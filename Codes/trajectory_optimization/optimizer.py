@@ -3,6 +3,61 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
+def plot_state_trajectory(x, u, params,
+                          state_labels=None,
+                          control_labels=None,
+                          ylabels_state=None,
+                          ylabels_control=None,
+                          suptitle="State and Control Trajectory"):
+    """
+    Plots the results of the trajectory optimization.
+    """
+    t = np.linspace(0, params['T'], x.shape[1], endpoint=True)
+    nx = params['n_x']
+    nu = params['n_u']
+    xf = params.get('xf', None)
+    x_lb = params.get('x_lb', None)
+    x_ub = params.get('x_ub', None)
+    u_lb = params.get('u_lb', None)
+    u_ub = params.get('u_ub', None)
+
+    if state_labels is None:
+        state_labels = [f'x[{i}]' for i in range(nx)]
+        if ylabels_state is None:
+            ylabels_state = state_labels
+    if control_labels is None:
+        control_labels = [f'u[{i}]' for i in range(nu)]
+        if ylabels_control is None:
+            ylabels_control = control_labels
+
+    fig, ax = plt.subplots(nx + nu, 1, figsize=(10, 10), sharex=True)
+    fig.suptitle(suptitle, fontsize=14)
+    
+    for i in range(nx):
+        ax[i].plot(t, x[i, :], label=state_labels[i])
+        ax[i].set_ylabel(ylabels_state[i])
+        if xf is not None and xf[i] is not None:
+            ax[i].plot(t, xf[i] * np.ones_like(t), 'k--', label='target')
+        if x_lb is not None and x_lb[i] is not None:
+            ax[i].plot(t, x_lb[i] * np.ones_like(t), 'g:', label='x_lb')
+        if x_ub is not None and x_ub[i] is not None:
+            ax[i].plot(t, x_ub[i] * np.ones_like(t), 'g:', label='x_ub')
+    for i in range(nu):
+        ax[nx + i].stairs(u[i, :], t, baseline=None, label=control_labels[i])
+        ax[nx + i].set_ylabel(ylabels_control[i])
+        if u_lb is not None and u_lb[i] is not None:
+            ax[nx + i].plot(t[:-1], u_lb[i] * np.ones_like(t[:-1]), 'g:', label='u_lb')
+        if u_ub is not None and u_ub[i] is not None:
+            ax[nx + i].plot(t[:-1], u_ub[i] * np.ones_like(t[:-1]), 'g:', label='u_ub')
+    ax[nx + nu - 1].set_xlabel('Time (s)')
+
+    for a in ax:
+        a.grid(True)
+        a.legend()
+        a.set_xlim(t[0], t[-1])
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout for suptitle
+    return fig, ax
+
 
 class TrajectoryOptimizer:
     def __init__(self, dynamics_fn, cost_fn,
@@ -96,7 +151,7 @@ class TrajectoryOptimizer:
         """
         Applies constraints. Prioritizes the user-defined constraints_fn.
         If constraints_fn is None, applies simple box constraints if defined
-        in params (x_lower_bound, x_upper_bound, u_lower_bound, u_upper_bound).
+        in params (x_lb, x_ub, u_lb, u_ub).
         """
         if self.constraints_fn is not None:
             # Apply user-defined constraints
@@ -105,10 +160,10 @@ class TrajectoryOptimizer:
         else:
             # Apply default box constraints if defined in params
             print("Applying default box constraints.")
-            x_lower_bound = self.params.get('x_lower_bound', (-ca.inf,) * self.n_x)
-            x_upper_bound = self.params.get('x_upper_bound', (ca.inf,) * self.n_x)
-            u_lower_bound = self.params.get('u_lower_bound', (-ca.inf,) * self.n_u)
-            u_upper_bound = self.params.get('u_upper_bound', (ca.inf,) * self.n_u)
+            x_lower_bound = self.params.get('x_lb', (-ca.inf,) * self.n_x)
+            x_upper_bound = self.params.get('x_ub', (ca.inf,) * self.n_x)
+            u_lower_bound = self.params.get('u_lb', (-ca.inf,) * self.n_u)
+            u_upper_bound = self.params.get('u_ub', (ca.inf,) * self.n_u)
             # Apply box constraints for state and control
             for i in range(self.n_x):
                 lb = x_lower_bound[i] if x_lower_bound[i] is not None else -ca.inf
@@ -120,21 +175,48 @@ class TrajectoryOptimizer:
                 self.opti.subject_to(self.opti.bounded(lb, self.U[i, :], ub))
 
     def _apply_boundary_conditions(self):
-        """Applies user-defined boundary conditions."""
+        """
+        Applies boundary conditions. Prioritizes boundary_conditions_fn.
+        If None, applies simple state equality constraints if 'x0' or 'xf'
+        are defined in params.
+        """
         if self.boundary_conditions_fn is not None:
+            # Apply user-defined boundary conditions
+            print("Applying user-defined boundary conditions.")
             self.boundary_conditions_fn(self.opti, self.X, self.U, self.params)
+        else:
+            # Apply default boundary conditions if defined in params
+            print("Applying default boundary conditions.")
+            x0 = self.params.get('x0', None)
+            xf = self.params.get('xf', None)
+            if x0 is not None:
+                self.opti.subject_to(self.X[:, 0] == x0)
+            if xf is not None:
+                self.opti.subject_to(self.X[:, -1] == xf)
 
     def solve(self, solver_name='ipopt', p_opts=None, s_opts=None):
         """Solves the optimization problem."""
         # Set default options if not provided     
         if self.initial_guess_fn is not None:
             # Set initial guess for optimization variables
+            print("Setting initial guess using user-defined function.")
             self.initial_guess_fn(self.opti, self.X, self.U, self.params)
-        # Prepare options for the solver
+        elif "x0" in self.params and "xf" in self.params:
+                # If initial and final states are provided, use them to set initial guess
+                print("Setting initial guess using provided x0 and xf.")
+                x0 = np.asarray(self.params['x0']).flatten()
+                xf = np.asarray(self.params['xf']).flatten()
+                if x0.shape != (self.n_x,) or xf.shape != (self.n_x,):
+                    raise ValueError("x0 and xf must have the same shape as the state dimension.")
+                x_init = np.linspace(x0, xf, self.N + 1, axis=1)
+                self.opti.set_initial(self.X, x_init)
+        else:
+            print("Warning: No initial guess provided. Using solver's default initialization (likely zeros).")
         default_p_opts = {"expand": True}
         default_s_opts = {
-            "max_iter": 3000,       # Increase max iterations if needed
-            "print_level": 5,       # IPOPT verbosity (0=silent)
+            "max_iter": 3000,      # Increase max iterations if needed
+            "print_level": 5,      # IPOPT verbosity (0=silent)
+            "tol": 1e-6,           # Solver tolerance
         }
         if p_opts is not None:
             default_p_opts.update(p_opts)
@@ -148,134 +230,10 @@ class TrajectoryOptimizer:
             sol = self.opti.solve()
             print("Optimization problem solved successfully.")
             # Extract the optimized trajectory
-            x_opt = sol.value(self.X)
-            u_opt = sol.value(self.U)
+            x_opt = sol.value(self.X).reshape(self.n_x, self.N + 1)
+            u_opt = sol.value(self.U).reshape(self.n_u, self.N)
             return x_opt, u_opt
         except RuntimeError as e:
             print("Error during optimization:", e)
             raise e # Re-raise the error for further handling
     
-
-
-def cartpole_dynamics(x, u, params, t=None):
-    m, M, L, g = params['m'], params['M'], params['L'], params['g']
-    x, theta, x_dot, theta_dot = x[0], x[1], x[2], x[3]
-    f = u[0] # Force applied to the cart
-    sin_theta = ca.sin(theta)
-    cos_theta = ca.cos(theta)
-    denom = M + m * sin_theta**2
-    x_ddot = (f - m * L * theta_dot**2 * sin_theta + m * g * sin_theta * cos_theta) / denom
-    theta_ddot = (f * cos_theta - m * L * theta_dot**2 * sin_theta * cos_theta + (M + m) * g * sin_theta) / (L * denom)
-    x_dot = ca.vertcat(x_dot, theta_dot, x_ddot, theta_ddot)
-    return x_dot
-
-def cartpole_constraints(opti, X, U, params):
-    # Add any additional constraints here
-    opti.subject_to(opti.bounded(-0.5, X[0, :], 0.5))  # Example limit on cart position
-    # opti.subject_to(opti.bounded(-7.0, U[0, :], 7.0))  # Example limit on control force
-
-def cartpole_boundary_conditions(opti, X, U, params):
-    # Initial conditions
-    opti.subject_to(X[0, 0] == 0)        # Initial cart position = 0
-    opti.subject_to(X[1, 0] == np.pi)    # Initial pole angle = pi (hanging down)
-    opti.subject_to(X[2, 0] == 0)        # Initial cart velocity = 0
-    opti.subject_to(X[3, 0] == 0)        # Initial pole angular velocity = 0
-
-    # Final conditions
-    opti.subject_to(X[0, -1] == 0)       # Final cart position = 0
-    opti.subject_to(X[1, -1] == 0)       # Final pole angle = 0 (upright)
-    opti.subject_to(X[2, -1] == 0)       # Final cart velocity = 0
-    opti.subject_to(X[3, -1] == 0)       # Final pole angular velocity = 0
-
-def cartpole_cost_fn(opti, X, U, params):
-    # Define a cost function (e.g., minimize control effort)
-    cost = ca.sumsqr(U)  # Minimize control effort
-    return cost
-
-def cartpole_initial_guess(opti, X, U, params):
-    angle = X[1, :]
-    X_size = X.shape[1]
-    # Simple linear interpolation often works reasonably well
-    opti.set_initial(angle, np.linspace(np.pi, 0, X_size))
-
-def cartpole_plot(x, u, params):
-    pos_opt = x[0, :]
-    angle_opt = x[1, :]
-    vel_opt = x[2, :]
-    ang_vel_opt = x[3, :]
-    u_opt = u[:]
-    t = np.linspace(0, params['T'], x.shape[1], endpoint=True)
-
-    plt.figure("Cartpole Trajectory Optimization Results", figsize=(10, 10))
-    plt.suptitle(f'Cartpole Swing-up Trajectory (T={params['T']})', fontsize=14)
-    plt.subplot(5, 1, 1)
-    plt.plot(t, pos_opt, label='x (m)')
-    plt.ylabel('Position'); plt.grid(True); plt.legend()
-    plt.subplot(5, 1, 2)
-    plt.plot(t, angle_opt, label='theta (rad)')
-    plt.plot(t, np.zeros_like(t), 'k--', label='target')
-    plt.ylabel('Angle'); plt.grid(True); plt.legend()
-    plt.subplot(5, 1, 3)
-    plt.plot(t, vel_opt, label='x_dot (m/s)')
-    plt.ylabel('Velocity'); plt.grid(True); plt.legend()
-    plt.subplot(5, 1, 4)
-    plt.plot(t, ang_vel_opt, label='theta_dot (rad/s)')
-    plt.ylabel('Ang Vel'); plt.grid(True); plt.legend()
-    plt.subplot(5, 1, 5)
-    plt.stairs(u_opt, t, baseline=None, color='r', label='u (Force N)')
-    plt.ylabel('Control'); plt.xlabel('Time (s)'); plt.grid(True); plt.legend()
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout for suptitle
-    plt.show()
-
-
-def main():
-    params = {
-        'T': 2.0,  # Total time
-        'dt_x': 0.001,  # Time step for state
-        'dt_u': 0.1,   # Time step for control
-        'n_x': 4,      # State dimension
-        'n_u': 1,      # Control dimension
-        # Cartpole parameters
-        'M': 1.0,  # Mass of the cart
-        'm': 0.1,  # Mass of the pole
-        'L': 0.5,  # Length of the pole
-        'g': 9.81, # Acceleration due to gravity
-        # Bounds
-        'u_lower_bound': (-15.0, ),  # Lower bound for control
-        'u_upper_bound': (15.0, ),   # Upper bound for control
-        'x_lower_bound': (-0.5, None, None, None),  # Lower bound for state
-        'x_upper_bound': (0.5, None, None, None),   # Upper bound for state
-    }
-
-    # Create an instance of the optimizer
-    optimizer = TrajectoryOptimizer(
-        dynamics_fn=cartpole_dynamics,
-        cost_fn=cartpole_cost_fn,
-        # constraints_fn=cartpole_constraints,
-        boundary_conditions_fn=cartpole_boundary_conditions,
-        initial_guess_fn=cartpole_initial_guess,
-        integration_method='trapezoidal',
-        params=params
-    )
-    # Setup the optimization problem
-    optimizer.setup()
-    # Solve the optimization problem
-    plugin_opts = {
-        "expand": True
-    }
-    solver_opts = {
-        "max_iter": 3000,
-        "print_level": 5,
-    }
-    try:
-        x_opt, u_opt = optimizer.solve(p_opts=plugin_opts, s_opts=solver_opts)
-        print("Optimal solution found!")
-        
-        # Plot the results
-        cartpole_plot(x_opt, u_opt, params)
-    except Exception as e:
-        print("An error occurred during optimization:")
-        # Handle the error (e.g., log it, retry, etc.)
-
-if __name__ == "__main__":
-    main()
