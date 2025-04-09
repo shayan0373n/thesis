@@ -43,7 +43,7 @@ def plot_state_trajectory(x, u, params,
         if x_ub is not None and x_ub[i] is not None:
             ax[i].plot(t, x_ub[i] * np.ones_like(t), 'g:', label='x_ub')
     for i in range(nu):
-        ax[nx + i].stairs(u[i, :], t, baseline=None, label=control_labels[i])
+        ax[nx + i].stairs(u[i, :], t, baseline=None, label=control_labels[i], color='orange')
         ax[nx + i].set_ylabel(ylabels_control[i])
         if u_lb is not None and u_lb[i] is not None:
             ax[nx + i].plot(t[:-1], u_lb[i] * np.ones_like(t[:-1]), 'g:', label='u_lb')
