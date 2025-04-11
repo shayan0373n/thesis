@@ -4,6 +4,11 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from optimizer import TrajectoryOptimizer, TrajectoryOptimizerParams, plot_state_trajectory # Assuming these are available
 
+def smooth_relu_quad(x, delta=1e-3):
+    """ Smooth approximation of max(x, 0) using sqrt """
+    # delta controls the smoothness (smaller delta = sharper corner)
+    return 0.5 * (ca.sqrt(x**2 + delta**2) + x)
+
 class TriplePendulum:
     """
     Represents a triple pendulum system, handling dynamics derivation,
@@ -33,11 +38,9 @@ class TriplePendulum:
         self.I3 = (1/12) * self.m3 * self.l3**2
 
         # Derive and store the symbolic dynamics function
-        self._dynamics_fn_sym = self._derive_symbolic_dynamics()
-        # Create a callable lambda matching the expected signature for the optimizer
-        self.dynamics_fn = lambda x, u, params, t=None: self._dynamics_fn_sym(x, u)
-        self.cost_fn = lambda opti, X, U, params: self._cost_fn(opti, X, U)
-        self.constraints_fn = lambda opti, X, U, params: self._constraints_fn(opti, X, U)
+        dynamics_fn_sym = self._derive_symbolic_dynamics()
+        self.dynamics_fn = lambda x, u, params: dynamics_fn_sym(x, u)  # Wrap in a lambda to match expected signature
+
         print("TriplePendulum initialized.")
 
     def _derive_symbolic_dynamics(self):
@@ -56,7 +59,8 @@ class TriplePendulum:
         tau1, tau2, tau3 = ca.SX.sym('tau1'), ca.SX.sym('tau2'), ca.SX.sym('tau3')
         x = ca.vertcat(q, q_dot)
         u_input = ca.vertcat(tau1, tau2, tau3)
-        u = ca.vertcat(u_input[0], 0, 0)  # Only use tau1 for now (i.e., turn off tau2 and tau3)
+        # u = ca.vertcat(u_input[0], 0, 0)  # Only use tau1 for now (i.e., turn off tau2 and tau3)
+        u = ca.vertcat(u_input[0], u_input[1], u_input[2])  # Use all three torques
         # Use parameters stored in the instance
         m1, l1, m2, l2, m3, l3 = self.m1, self.l1, self.m2, self.l2, self.m3, self.l3
         g = self.g
@@ -95,6 +99,9 @@ class TriplePendulum:
 
         C_G = ca.jtimes(dL_dqdot, q, q_dot) - dL_dq # Coriolis, Centrifugal, Gravity terms
         # C_G = ca.simplify(C_G) # Optional simplification
+        
+        # Contact dynamics
+        K = 1000
 
         N = u - C_G # RHS for M*q_ddot = N
 
@@ -109,37 +116,26 @@ class TriplePendulum:
         print("Symbolic dynamics derived.")
         return dynamics_function
 
-    def _cost_fn(self, opti, X, U):
-        """
-        Default cost function: minimize sum squared control effort.
-        Can be overridden or replaced in TrajectoryOptimizer setup.
-        """
+    def _cost_power(self, opti, X, U, params):
         return ca.sumsqr(U)
+    
+    def _cost_energy(self, opti, X, U, params):
+        """
+        Cost function to minimize energy consumption.
+        """
+        P = X[3:, :-1] * U  # Power = torque * angular velocity
+        cost = ca.sumsqr(P) * params.dt_x  # Total energy consumed
+        return cost
 
-    def _constraints_fn(self, opti, X, U):
+    def _constraints_fn(self, opti, X, U, params):
         """
         Default constraints function. Example: constrain end-effector x-pos.
         Can be overridden or replaced in TrajectoryOptimizer setup.
         """
         print("Applying constraints...")
-        # Example constraint: Keep the end effector's x within bounds [-0.1, 0.1]
-        l1, l2, l3 = self.l1, self.l2, self.l3
-        n_steps = X.shape[1] # Number of trajectory points (N+1)
-
-        for i in range(n_steps):
-            th1_i = X[0, i]
-            th2_i = X[1, i]
-            th3_i = X[2, i]
-            # End effector X position (using 0=up, positive=CCW convention)
-            ee_x = -l1 * ca.sin(th1_i) - l2 * ca.sin(th2_i) - l3 * ca.sin(th3_i)
-            # Apply constraint (e.g., keep it near the vertical line)
-            opti.subject_to(opti.bounded(-0.1, ee_x, 0.1))
-
-        # Add other constraints if needed, e.g., on torques U:
-        # max_torque = 10.0
-        # opti.subject_to(opti.bounded(-max_torque, U, max_torque))
-        print("Constraints applied.")
-
+        # Keep the hips' y-position above the lower leg
+        hip_y = self.l1 * ca.cos(X[0, :]) + self.l2 * ca.cos(X[1, :])
+        opti.subject_to(hip_y >= self.l1) # Avoid penetration
 
     def setup_optimizer(self, params, integration_method='rk4'):
         """
@@ -148,9 +144,10 @@ class TriplePendulum:
         print(f"Setting up TrajectoryOptimizer with integration: {integration_method}")
         optimizer = TrajectoryOptimizer(
             dynamics_fn=self.dynamics_fn,
-            cost_fn=self.cost_fn,
-            constraints_fn=self.constraints_fn,
+            cost_fn=self._cost_power,
+            constraints_fn=self._constraints_fn,
             integration_method=integration_method,
+            is_t_variable=False,
             params=params # Pass the full params dict
         )
         optimizer.setup()
@@ -268,9 +265,9 @@ def main():
     print("Setting up Triple Pendulum simulation...")
     # Define the parameters for the triple pendulum
     # Ensure consistency in parameter names if TrajectoryOptimizer expects specific ones
-    rod1_p = {'m': 1.0, 'l': 1.0}
-    rod2_p = {'m': 1.0, 'l': 0.8}
-    rod3_p = {'m': 0.5, 'l': 0.5}
+    rod1_p = {'m': 0.186, 'l': 0.478}
+    rod2_p = {'m': 0.4, 'l': 0.489}
+    rod3_p = {'m': 1.356, 'l': 0.932}
     d_params = {
         'rod1': rod1_p,
         'rod2': rod2_p,
@@ -279,15 +276,16 @@ def main():
     }
     params = {
         # Timing
-        'T': 5.0,       # Total time horizon (s)
-        'dt_x': 0.02,   # State integration time step (s)
-        'dt_u': 0.04,   # Control interval time step (dt_u >= dt_x)
+        # 'N': 200,
+        'T': 2.0,       # Total time horizon (s)
+        'dt_x': 0.001,   # State integration time step (s)
+        'dt_u': 0.01,   # Control interval time step (dt_u >= dt_x)
         # Dimensions
         'n_x': 6,       # State dimension [th1, th2, th3, om1, om2, om3]
         'n_u': 3,       # Control dimension [tau1, tau2, tau3]
         # Initial and final states (ensure length matches n_x)
         # Example: Start hanging down, finish upright
-        'x0': np.array([np.pi, np.pi, np.pi, 0.0, 0.0, 0.0]), # Hanging down
+        'x0': np.array([0, np.pi/2, 0, 0.0, 0.0, 0.0]), # Hanging down
         'xf': np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),     # Straight up
         # Bounds (Optional - add if needed by optimizer/constraints)
         # 'u_lb': np.array([-10.0, -10.0, -10.0]),
@@ -300,7 +298,7 @@ def main():
     pendulum = TriplePendulum(d_params)
 
     # Setup the optimizer using the pendulum's methods
-    optimizer = pendulum.setup_optimizer(params, integration_method='rk4') # Or 'euler', 'trapezoidal'
+    optimizer = pendulum.setup_optimizer(params, integration_method='trapezoidal')
 
     # Define solver options if defaults are not desired
     # plugin_opts = {"expand": True}

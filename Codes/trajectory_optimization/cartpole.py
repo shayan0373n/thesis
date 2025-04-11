@@ -12,6 +12,11 @@ D_PARAMS = {
     'g': 9.81, # Gravitational acceleration (m/s^2)
 }
 
+def smooth_relu_quad(x, delta=1e-3):
+    """ Smooth approximation of max(x, 0) using sqrt """
+    # delta controls the smoothness (smaller delta = sharper corner)
+    return 0.5 * (ca.sqrt(x**2 + delta**2) + x)
+
 def cartpole_dynamics(x, u, params, t=None):
     m, M, L, g = D_PARAMS['m'], D_PARAMS['M'], D_PARAMS['L'], D_PARAMS['g']
     x, theta, x_dot, theta_dot = x[0], x[1], x[2], x[3]
@@ -51,6 +56,13 @@ def cartpole_cost_time(opti, X, U, params):
     # Minimize time spent in the system
     T = params.T  # Total time
     return T
+
+def cartpole_cost_energy(opti, X, U, params):
+    # Minimize energy consumption
+    P = X[2, :-1] * U[0, :]  # Power = force * velocity
+    positive_P = smooth_relu_quad(P, delta=1E-3)  # Smooth ReLU to avoid negative power
+    cost = ca.sum2(positive_P) * params.dt_x # Total energy consumed
+    return cost
 
 def cartpole_initial_guess(opti, X, U, params):
     angle = X[1, :]
@@ -142,15 +154,15 @@ def animate_cartpole(x, params):
 def main():
     params = {
         'T': 2.0,  # Total time
-        'dt_x': 0.001,  # Time step for state
-        'dt_u': 0.02,   # Time step for control
+        'dt_x': 0.1,  # Time step for state
+        'dt_u': 0.2,   # Time step for control
         'n_x': 4,      # State dimension
         'n_u': 1,      # Control dimension
         # Bounds
         'u_lb': (-10.0, ),  # Lower bound for control
         'u_ub': (10.0, ),   # Upper bound for control
-        'x_lb': (-0.5, None, None, None),  # Lower bound for state
-        'x_ub': (0.5, None, None, None),   # Upper bound for state
+        # 'x_lb': (-0.5, None, None, None),  # Lower bound for state
+        # 'x_ub': (0.5, None, None, None),   # Upper bound for state
         # Initial and final values
         'x0': (0, np.pi, 0, 0),  # Initial state
         'xf': (0, 0, 0, 0),      # Final state
@@ -160,7 +172,8 @@ def main():
     optimizer = TrajectoryOptimizer(
         dynamics_fn=cartpole_dynamics,
         # cost_fn=cartpole_cost_fn,
-        cost_fn=cartpole_cost_time,
+        # cost_fn=cartpole_cost_time,
+        cost_fn=cartpole_cost_energy,
         # constraints_fn=cartpole_constraints,
         # boundary_conditions_fn=cartpole_boundary_conditions,
         # initial_guess_fn=cartpole_initial_guess,
@@ -176,7 +189,7 @@ def main():
     }
     solver_opts = {
         "max_iter": 3000,
-        "print_level": 1,
+        "print_level": 5,
     }
     try:
         x_opt, u_opt = optimizer.solve(p_opts=plugin_opts, s_opts=solver_opts)

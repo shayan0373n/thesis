@@ -115,6 +115,8 @@ class TrajectoryOptimizer:
                 self.params.dt_x = self.params.T / self.params.N
             if self.params.dt_u == 0:
                 self.params.dt_u = self.params.dt_x
+            if self.params.T == 0:
+                self.params.T = self.params.N * self.params.dt_x
         if self.params.x0 is None:
             self.params.x0 = (0,) * self.params.n_x
         if self.params.xf is None:
@@ -282,6 +284,7 @@ class TrajectoryOptimizer:
         try:
             sol = self.opti.solve()
             print("Optimization problem solved successfully.")
+            print("Final cost:", sol.value(self.cost_fn(self.opti, self.X, self.U, self.params)))
             # Extract the optimized trajectory
             x_opt = sol.value(self.X).reshape(self.params.n_x, self.params.N + 1)
             u_opt = sol.value(self.U).reshape(self.params.n_u, self.params.N)
