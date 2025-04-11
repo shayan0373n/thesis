@@ -2,7 +2,23 @@ import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from optimizer import TrajectoryOptimizer, plot_state_trajectory
+from optimizer import TrajectoryOptimizer, TrajectoryOptimizerParams, plot_state_trajectory
+
+rod1 = {
+    'm': 1.0,  # Mass of rod 1
+    'l': 1.0,  # Length of rod 1
+    # 'I': 1.0,  # Moment of inertia of rod 1
+}
+rod2 = {
+    'm': 1.0,  # Mass of rod 2
+    'l': 1.0,  # Length of rod 2
+    # 'I': 1.0,  # Moment of inertia of rod 2
+}
+D_PARAMS = {
+    'rod1': rod1,
+    'rod2': rod2,
+    'g': 9.81, # Acceleration due to gravity
+}
 
 def double_pend_dynamics(x, u, params, t=None):
     # Get current torque values
@@ -12,11 +28,11 @@ def double_pend_dynamics(x, u, params, t=None):
     theta1, theta2, theta1_dot, theta2_dot = x[0], x[1], x[2], x[3]
 
     # Unpack parameters
-    m1 = params['rod1']['m']  # Mass of rod 1
-    l1 = params['rod1']['l']  # Length of rod 1
-    m2 = params['rod2']['m']  # Mass of rod 2
-    l2 = params['rod2']['l']  # Length of rod 2
-    g = params['g']           # Gravitational acceleration
+    m1 = D_PARAMS['rod1']['m']  # Mass of rod 1
+    l1 = D_PARAMS['rod1']['l']  # Length of rod 1
+    m2 = D_PARAMS['rod2']['m']  # Mass of rod 2
+    l2 = D_PARAMS['rod2']['l']  # Length of rod 2
+    g = D_PARAMS['g']           # Gravitational acceleration
 
     # Pre-calculate trigonometric terms for efficiency
     c12 = ca.cos(theta1 - theta2)
@@ -62,8 +78,8 @@ def double_pend_cost_fn(opti, X, U, params):
 def double_pend_constraints(opti, X, U, params):
     # Add any additional constraints here
     # Keep the end effector's x equal to zero
-    l1 = params['rod1']['l']
-    l2 = params['rod2']['l']
+    l1 = D_PARAMS['rod1']['l']
+    l2 = D_PARAMS['rod2']['l']
     for i in range(X.shape[1]):
         # End effector position
         ee_x = -l1 * ca.sin(X[0, i]) - l2 * ca.sin(X[1, i])
@@ -84,10 +100,10 @@ def animate_double_pendulum(x, params):
     """
     theta1_opt = x[0, :]
     theta2_opt = x[1, :]
-    l1 = params['rod1']['l']  # Length of rod 1
-    l2 = params['rod2']['l']  # Length of rod 2
-    T = params['T']  # Total time
-    dt = params['dt_x']
+    l1 = D_PARAMS['rod1']['l']  # Length of rod 1
+    l2 = D_PARAMS['rod2']['l']  # Length of rod 2
+    T = params.T  # Total time
+    dt = params.dt_x  # Time step for state
     N = int(T / dt)  # Number of control intervals
     fig_anim, ax_anim = plt.subplots(figsize=(10, 6))
     ax_anim.set_aspect('equal') # Ensure correct aspect ratio
@@ -141,27 +157,13 @@ def animate_double_pendulum(x, params):
     return ani
 
 def main():
-    # Define the parameters for the double pendulum
-    rod1 = {
-        'm': 1.0,  # Mass of rod 1
-        'l': 1.0,  # Length of rod 1
-        # 'I': 1.0,  # Moment of inertia of rod 1
-    }
-    rod2 = {
-        'm': 1.0,  # Mass of rod 2
-        'l': 1.0,  # Length of rod 2
-        # 'I': 1.0,  # Moment of inertia of rod 2
-    }
+    # Define the parameters
     params = {
         'T': 5.0,  # Total time
         'dt_x': 0.01,  # Time step for state
         'dt_u': 0.02,   # Time step for control
         'n_x': 4,      # State dimension
         'n_u': 2,      # Control dimension
-        # Dynamics parameters
-        'rod1': rod1,
-        'rod2': rod2,
-        'g': 9.81, # Acceleration due to gravity
         # Bounds
         # 'u_lb': (-15.0, ),  # Lower bound for control
         # 'u_ub': (15.0, ),   # Upper bound for control
@@ -171,7 +173,7 @@ def main():
         'x0': (np.pi, np.pi, 0, 0),  # Initial state
         'xf': (0, 0, 0, 0),      # Final state
     }
-
+    params = TrajectoryOptimizerParams(**params)
     # Create an instance of the optimizer
     optimizer = TrajectoryOptimizer(
         dynamics_fn=double_pend_dynamics,
@@ -180,7 +182,7 @@ def main():
         # boundary_conditions_fn=cartpole_boundary_conditions,
         # initial_guess_fn=cartpole_initial_guess,
         integration_method='trapezoidal',
-        params=params
+        params=params,
     )
     # Setup the optimization problem
     optimizer.setup()

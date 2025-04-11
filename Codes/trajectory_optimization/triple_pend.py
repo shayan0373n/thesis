@@ -2,7 +2,7 @@ import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from optimizer import TrajectoryOptimizer, plot_state_trajectory # Assuming these are available
+from optimizer import TrajectoryOptimizer, TrajectoryOptimizerParams, plot_state_trajectory # Assuming these are available
 
 class TriplePendulum:
     """
@@ -31,8 +31,6 @@ class TriplePendulum:
         self.I1 = (1/12) * self.m1 * self.l1**2
         self.I2 = (1/12) * self.m2 * self.l2**2
         self.I3 = (1/12) * self.m3 * self.l3**2
-        self.n_x = params['n_x']
-        self.n_u = params['n_u']
 
         # Derive and store the symbolic dynamics function
         self._dynamics_fn_sym = self._derive_symbolic_dynamics()
@@ -143,7 +141,7 @@ class TriplePendulum:
         print("Constraints applied.")
 
 
-    def setup_optimizer(self, integration_method='rk4'):
+    def setup_optimizer(self, params, integration_method='rk4'):
         """
         Creates and configures the TrajectoryOptimizer instance.
         """
@@ -153,7 +151,7 @@ class TriplePendulum:
             cost_fn=self.cost_fn,
             constraints_fn=self.constraints_fn,
             integration_method=integration_method,
-            params=self.params # Pass the full params dict
+            params=params # Pass the full params dict
         )
         optimizer.setup()
         print("Optimizer setup complete.")
@@ -181,7 +179,7 @@ class TriplePendulum:
             # return None, None
 
 
-    def animate(self, x_opt):
+    def animate(self, x_opt, params):
         """
         Animates the triple pendulum system based on the state trajectory.
 
@@ -193,8 +191,8 @@ class TriplePendulum:
         theta2_opt = x_opt[1, :]
         theta3_opt = x_opt[2, :] # Get theta3
         l1, l2, l3 = self.l1, self.l2, self.l3
-        T = self.params['T']
-        dt = self.params['dt_x']
+        T = params.T
+        dt = params.dt_x # State integration time step
         N = int(T / dt)
 
         fig_anim, ax_anim = plt.subplots(figsize=(8, 8)) # Adjusted size
@@ -272,7 +270,12 @@ def main():
     rod1_p = {'m': 1.0, 'l': 1.0}
     rod2_p = {'m': 1.0, 'l': 0.8}
     rod3_p = {'m': 0.5, 'l': 0.5}
-
+    d_params = {
+        'rod1': rod1_p,
+        'rod2': rod2_p,
+        'rod3': rod3_p,
+        'g': 9.81, # Gravity (m/s^2)
+    }
     params = {
         # Timing
         'T': 5.0,       # Total time horizon (s)
@@ -281,11 +284,6 @@ def main():
         # Dimensions
         'n_x': 6,       # State dimension [th1, th2, th3, om1, om2, om3]
         'n_u': 3,       # Control dimension [tau1, tau2, tau3]
-        # Dynamics parameters
-        'rod1': rod1_p,
-        'rod2': rod2_p,
-        'rod3': rod3_p,
-        'g': 9.81,      # Acceleration due to gravity (m/s^2)
         # Initial and final states (ensure length matches n_x)
         # Example: Start hanging down, finish upright
         'x0': np.array([np.pi, np.pi, np.pi, 0.0, 0.0, 0.0]), # Hanging down
@@ -296,12 +294,12 @@ def main():
         # 'x_lb': np.array([-2*np.pi]*3 + [-10.0]*3), # Example state bounds
         # 'x_ub': np.array([ 2*np.pi]*3 + [ 10.0]*3),
     }
-
+    params = TrajectoryOptimizerParams(**params) # Convert to TrajectoryOptimizerParams
     # Create the pendulum instance (derives dynamics)
-    pendulum = TriplePendulum(params)
+    pendulum = TriplePendulum(d_params)
 
     # Setup the optimizer using the pendulum's methods
-    optimizer = pendulum.setup_optimizer(integration_method='rk4') # Or 'euler', 'trapezoidal'
+    optimizer = pendulum.setup_optimizer(params, integration_method='rk4') # Or 'euler', 'trapezoidal'
 
     # Define solver options if defaults are not desired
     # plugin_opts = {"expand": True}
@@ -319,7 +317,7 @@ def main():
             print(f"Could not plot state trajectory: {plot_err}") # Handle if plotter fails
 
         # Animate the result
-        ani = pendulum.animate(x_opt)
+        ani = pendulum.animate(x_opt, params)
 
         # Keep plots displayed
         plt.show()

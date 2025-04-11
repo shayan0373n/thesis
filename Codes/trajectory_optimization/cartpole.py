@@ -2,10 +2,18 @@ import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from optimizer import TrajectoryOptimizer, plot_state_trajectory
+from optimizer import TrajectoryOptimizer, TrajectoryOptimizerParams, plot_state_trajectory
+
+# Cartpole parameters
+D_PARAMS = {
+    'm': 0.1,  # Mass of the pole (kg)
+    'M': 1,  # Mass of the cart (kg)
+    'L': 0.5,  # Length of the pole (m)
+    'g': 9.81, # Gravitational acceleration (m/s^2)
+}
 
 def cartpole_dynamics(x, u, params, t=None):
-    m, M, L, g = params['m'], params['M'], params['L'], params['g']
+    m, M, L, g = D_PARAMS['m'], D_PARAMS['M'], D_PARAMS['L'], D_PARAMS['g']
     x, theta, x_dot, theta_dot = x[0], x[1], x[2], x[3]
     f = u[0] # Force applied to the cart
     sin_theta = ca.sin(theta)
@@ -39,6 +47,11 @@ def cartpole_cost_fn(opti, X, U, params):
     cost = ca.sumsqr(U)  # Minimize control effort
     return cost
 
+def cartpole_cost_time(opti, X, U, params):
+    # Minimize time spent in the system
+    T = params.T  # Total time
+    return T
+
 def cartpole_initial_guess(opti, X, U, params):
     angle = X[1, :]
     X_size = X.shape[1]
@@ -57,9 +70,9 @@ def animate_cartpole(x, params):
     """
     pos_opt = x[0, :]
     angle_opt = x[1, :]
-    L = params['L']  # Length of the pole
-    T = params['T']  # Total time
-    dt = params['dt_x']
+    L = D_PARAMS['L']  # Length of the pole
+    T = params.T  # Total time
+    dt = params.dt_x  # Time step for state
     N = int(T / dt)  # Number of control intervals
 
     fig_anim, ax_anim = plt.subplots(figsize=(10, 6))
@@ -129,34 +142,31 @@ def animate_cartpole(x, params):
 def main():
     params = {
         'T': 2.0,  # Total time
-        'dt_x': 0.01,  # Time step for state
-        'dt_u': 0.1,   # Time step for control
+        'dt_x': 0.001,  # Time step for state
+        'dt_u': 0.02,   # Time step for control
         'n_x': 4,      # State dimension
         'n_u': 1,      # Control dimension
-        # Cartpole parameters
-        'M': 1.0,  # Mass of the cart
-        'm': 0.1,  # Mass of the pole
-        'L': 0.5,  # Length of the pole
-        'g': 9.81, # Acceleration due to gravity
         # Bounds
-        'u_lb': (-15.0, ),  # Lower bound for control
-        'u_ub': (15.0, ),   # Upper bound for control
+        'u_lb': (-10.0, ),  # Lower bound for control
+        'u_ub': (10.0, ),   # Upper bound for control
         'x_lb': (-0.5, None, None, None),  # Lower bound for state
-        'x_up': (0.5, None, None, None),   # Upper bound for state
+        'x_ub': (0.5, None, None, None),   # Upper bound for state
         # Initial and final values
         'x0': (0, np.pi, 0, 0),  # Initial state
         'xf': (0, 0, 0, 0),      # Final state
     }
-
+    params = TrajectoryOptimizerParams(**params)
     # Create an instance of the optimizer
     optimizer = TrajectoryOptimizer(
         dynamics_fn=cartpole_dynamics,
-        cost_fn=cartpole_cost_fn,
+        # cost_fn=cartpole_cost_fn,
+        cost_fn=cartpole_cost_time,
         # constraints_fn=cartpole_constraints,
         # boundary_conditions_fn=cartpole_boundary_conditions,
         # initial_guess_fn=cartpole_initial_guess,
         integration_method='trapezoidal',
-        params=params
+        is_t_variable=True,
+        params=params,
     )
     # Setup the optimization problem
     optimizer.setup()
@@ -166,7 +176,7 @@ def main():
     }
     solver_opts = {
         "max_iter": 3000,
-        "print_level": 5,
+        "print_level": 1,
     }
     try:
         x_opt, u_opt = optimizer.solve(p_opts=plugin_opts, s_opts=solver_opts)

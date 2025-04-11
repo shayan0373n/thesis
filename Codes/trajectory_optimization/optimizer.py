@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from typing import Callable, Optional, Union
 import casadi as ca
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,14 +14,14 @@ def plot_state_trajectory(x, u, params,
     """
     Plots the results of the trajectory optimization.
     """
-    t = np.linspace(0, params['T'], x.shape[1], endpoint=True)
-    nx = params['n_x']
-    nu = params['n_u']
-    xf = params.get('xf', None)
-    x_lb = params.get('x_lb', None)
-    x_ub = params.get('x_ub', None)
-    u_lb = params.get('u_lb', None)
-    u_ub = params.get('u_ub', None)
+    t = np.linspace(0, params.T, x.shape[1], endpoint=True)
+    nx = params.n_x
+    nu = params.n_u
+    xf = params.xf
+    x_lb = params.x_lb
+    x_ub = params.x_ub
+    u_lb = params.u_lb
+    u_ub = params.u_ub
 
     if state_labels is None:
         state_labels = [f'x[{i}]' for i in range(nx)]
@@ -58,37 +60,83 @@ def plot_state_trajectory(x, u, params,
     fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout for suptitle
     return fig, ax
 
+@dataclass
+class TrajectoryOptimizerParams:
+    n_x: int = 0
+    n_u: int = 0
+    N: int = 0
+    dt_x: float = 0.0
+    dt_u: float = 0.0
+    T: float = 0.0
+    x0: tuple = None
+    xf: tuple = None
+    x_lb: tuple = None
+    x_ub: tuple = None
+    u_lb: tuple = None
+    u_ub: tuple = None
+    T_lb: float = None
+    T_ub: float = None
+    T_guess: float = 1.0
+    other: dict = None
 
 class TrajectoryOptimizer:
     def __init__(self, dynamics_fn, cost_fn,
                  constraints_fn=None,
                  boundary_conditions_fn=None,
                  initial_guess_fn=None,
+                 control_input_method ='ZOH',
                  integration_method='trapezoidal',
-                 params={}):
+                 is_t_variable=False,
+                 params=None):
         # Store functions and parameters
         self.dynamics_fn = dynamics_fn
         self.cost_fn = cost_fn
         self.constraints_fn = constraints_fn
         self.initial_guess_fn = initial_guess_fn
         self.boundary_conditions_fn = boundary_conditions_fn
+        self.control_input_method = control_input_method
         self.integration_method = integration_method
+        self.is_t_variable = is_t_variable
         self.params = params
 
-        # Extract parameters
-        self.T = params['T']  # Total time
-        self.dt_x = params.get('dt_x', params.get('dt', 0.01))  # Time step for state
-        self.dt_u = params.get('dt_u', params.get('dt', 0.01))  # Time step for control
-        self.N = int(self.T / self.dt_x)  # Number of control intervals
-        self.n_x = params['n_x'] # State dimension
-        self.n_u = params['n_u'] # Control dimension
+        # Evaluate parameters
+        if self.params.n_x == 0:
+            raise ValueError("n_x must be defined in params.")
+        if self.params.n_u == 0:
+            raise ValueError("n_u must be defined in params.")
+        if is_t_variable:
+            if self.params.N == 0:
+                print("Warning: N is not defined, setting N to 100 for T variable optimization.")
+                self.params.N = 100
+        else:
+            if self.params.N == 0:
+                self.params.N = int(self.params.T / self.params.dt_x)
+            if self.params.dt_x == 0:
+                self.params.dt_x = self.params.T / self.params.N
+            if self.params.dt_u == 0:
+                self.params.dt_u = self.params.dt_x
+        if self.params.x0 is None:
+            self.params.x0 = (0,) * self.params.n_x
+        if self.params.xf is None:
+            self.params.xf = (0,) * self.params.n_x
+        if self.params.x_lb is None:
+            self.params.x_lb = (-ca.inf,) * self.params.n_x
+        if self.params.x_ub is None:
+            self.params.x_ub = (ca.inf,) * self.params.n_x
+        if self.params.u_lb is None:
+            self.params.u_lb = (-ca.inf,) * self.params.n_u
+        if self.params.u_ub is None:
+            self.params.u_ub = (ca.inf,) * self.params.n_u
     
     def setup(self):
         """Sets up the optimization problem."""
         # Setup optimization variables
         self.opti = ca.Opti()  # Create an optimization problem
-        self.X = self.opti.variable(self.n_x, self.N + 1)
-        self.U = self.opti.variable(self.n_u, self.N)
+        self.X = self.opti.variable(self.params.n_x, self.params.N + 1)
+        self.U = self.opti.variable(self.params.n_u, self.params.N)
+        if self.is_t_variable:
+            self.params.T = self.opti.variable(1)
+            self.params.dt_x = self.params.T / self.params.N
         # --- Set Objective ---
         cost = self.cost_fn(self.opti, self.X, self.U, self.params)
         self.opti.minimize(cost)
@@ -101,7 +149,7 @@ class TrajectoryOptimizer:
         
     def _apply_dynamics_constraints(self):
         """Applies the dynamics constraints using Trapezoidal integration."""
-        for i in range(self.N):
+        for i in range(self.params.N):
             x_i = self.X[:, i]
             x_i_plus_1 = self.X[:, i + 1]
             u_i = self.U[:, i]
@@ -114,38 +162,40 @@ class TrajectoryOptimizer:
                 # Here we assume u is constant over dt_x
                 f_i = self.dynamics_fn(x_i, u_i, self.params)
                 f_i_plus_1 = self.dynamics_fn(x_i_plus_1, u_i, self.params)
-                self.opti.subject_to(x_i_plus_1 == x_i + (self.dt_x / 2) * (f_i + f_i_plus_1))
+                self.opti.subject_to(x_i_plus_1 == x_i + (self.params.dt_x / 2) * (f_i + f_i_plus_1))
             elif self.integration_method == 'euler':
                 # Euler integration: x_{i+1} = x_i + dt_x * f_i
                 f_i = self.dynamics_fn(x_i, u_i, self.params)
-                self.opti.subject_to(x_i_plus_1 == x_i + self.dt_x * f_i)
+                self.opti.subject_to(x_i_plus_1 == x_i + self.params.dt_x * f_i)
             elif self.integration_method == 'rk4':
                 # Runge-Kutta 4th order integration: x_{i+1} = x_i + (dt_x/6) * (k1 + 2*k2 + 2*k3 + k4)
                 k1 = self.dynamics_fn(x_i, u_i, self.params)
-                k2 = self.dynamics_fn(x_i + (self.dt_x / 2) * k1, u_i, self.params)
-                k3 = self.dynamics_fn(x_i + (self.dt_x / 2) * k2, u_i, self.params)
-                k4 = self.dynamics_fn(x_i + self.dt_x * k3, u_i, self.params)
-                self.opti.subject_to(x_i_plus_1 == x_i + (self.dt_x / 6) * (k1 + 2*k2 + 2*k3 + k4))
+                k2 = self.dynamics_fn(x_i + (self.params.dt_x / 2) * k1, u_i, self.params)
+                k3 = self.dynamics_fn(x_i + (self.params.dt_x / 2) * k2, u_i, self.params)
+                k4 = self.dynamics_fn(x_i + self.params.dt_x * k3, u_i, self.params)
+                self.opti.subject_to(x_i_plus_1 == x_i + (self.params.dt_x / 6) * (k1 + 2*k2 + 2*k3 + k4))
             else:
                 raise NotImplementedError(f"Unknown integration method: {self.integration_method}")
 
     def _apply_control_constraints(self):
         """Applies Zero-Order Hold (ZOH) constraints to the control inputs."""
-        # Check if dt_u is actually smaller than dt_x, otherwise ZOH doesn't make sense here.
-        if self.dt_u <= self.dt_x:
-             # If control updates as fast or faster than state, no ZOH needed between state steps
-             print("Warning: dt_u <= dt_x, ZOH constraint between state steps is trivial. Each U[:,i] can be independent.")
-             return
-        # Calculate how many state steps correspond to one control step
-        steps_per_control = round(self.dt_u / self.dt_x)
-        if not np.isclose(steps_per_control * self.dt_x, self.dt_u):
-            print(f"Warning: dt_u ({self.dt_u}) is not an integer multiple of dt_x ({self.dt_x}). ZOH implementation might be approximate.")
-        for i in range(1, self.N):
-            # If the current state step 'i' does NOT start a new control interval
-            # (i.e., it's not 0, steps_per_control, 2*steps_per_control, ...)
-            # then the control U[:, i] must be the same as the previous one U[:, i-1].
-            if i % steps_per_control != 0:
-                self.opti.subject_to(self.U[:, i] == self.U[:, i-1])
+        if self.control_input_method == 'ZOH':
+            # Check if dt_u is actually smaller than dt_x, otherwise ZOH doesn't make sense here.
+            if self.is_t_variable:
+                print("ZOH is not applicable when T is a variable. Using dt_x for control intervals.")
+                return
+            # Calculate how many state steps correspond to one control step
+            steps_per_control = round(self.params.dt_u / self.params.dt_x)
+            if not np.isclose(steps_per_control * self.params.dt_x, self.params.dt_u):
+                print(f"Warning: dt_u ({self.params.dt_u}) is not an integer multiple of dt_x ({self.params.dt_x}). ZOH implementation might be approximate.")
+            for i in range(1, self.params.N):
+                # If the current state step 'i' does NOT start a new control interval
+                # (i.e., it's not 0, steps_per_control, 2*steps_per_control, ...)
+                # then the control U[:, i] must be the same as the previous one U[:, i-1].
+                if i % steps_per_control != 0:
+                    self.opti.subject_to(self.U[:, i] == self.U[:, i-1])
+        else:
+            raise NotImplementedError(f"Unknown control input method: {self.control_input_method}")
 
     def _apply_custom_constraints(self):
         """
@@ -153,6 +203,9 @@ class TrajectoryOptimizer:
         If constraints_fn is None, applies simple box constraints if defined
         in params (x_lb, x_ub, u_lb, u_ub).
         """
+        if self.is_t_variable:
+            # Make sure T is positive
+            self.opti.subject_to(self.params.T >= 1E-6)
         if self.constraints_fn is not None:
             # Apply user-defined constraints
             print("Applying user-defined constraints.")
@@ -160,19 +213,22 @@ class TrajectoryOptimizer:
         else:
             # Apply default box constraints if defined in params
             print("Applying default box constraints.")
-            x_lower_bound = self.params.get('x_lb', (-ca.inf,) * self.n_x)
-            x_upper_bound = self.params.get('x_ub', (ca.inf,) * self.n_x)
-            u_lower_bound = self.params.get('u_lb', (-ca.inf,) * self.n_u)
-            u_upper_bound = self.params.get('u_ub', (ca.inf,) * self.n_u)
             # Apply box constraints for state and control
-            for i in range(self.n_x):
-                lb = x_lower_bound[i] if x_lower_bound[i] is not None else -ca.inf
-                ub = x_upper_bound[i] if x_upper_bound[i] is not None else ca.inf
+            for i in range(self.params.n_x):
+                lb = self.params.x_lb[i] if self.params.x_lb[i] is not None else -ca.inf
+                ub = self.params.x_ub[i] if self.params.x_ub[i] is not None else ca.inf
                 self.opti.subject_to(self.opti.bounded(lb, self.X[i, :], ub))
-            for i in range(self.n_u):
-                lb = u_lower_bound[i] if u_lower_bound[i] is not None else -ca.inf
-                ub = u_upper_bound[i] if u_upper_bound[i] is not None else ca.inf
+            for i in range(self.params.n_u):
+                lb = self.params.u_lb[i] if self.params.u_lb[i] is not None else -ca.inf
+                ub = self.params.u_ub[i] if self.params.u_ub[i] is not None else ca.inf
                 self.opti.subject_to(self.opti.bounded(lb, self.U[i, :], ub))
+            if self.is_t_variable:
+                # Apply upper bound for T if defined in params
+                if self.params.T_ub is not None:
+                    self.opti.subject_to(self.params.T <= self.params.T_ub)
+                # Apply lower bound for T if defined in params
+                if self.params.T_lb is not None:
+                    self.opti.subject_to(self.params.T >= self.params.T_lb)
 
     def _apply_boundary_conditions(self):
         """
@@ -187,12 +243,8 @@ class TrajectoryOptimizer:
         else:
             # Apply default boundary conditions if defined in params
             print("Applying default boundary conditions.")
-            x0 = self.params.get('x0', None)
-            xf = self.params.get('xf', None)
-            if x0 is not None:
-                self.opti.subject_to(self.X[:, 0] == x0)
-            if xf is not None:
-                self.opti.subject_to(self.X[:, -1] == xf)
+            self.opti.subject_to(self.X[:, 0] == self.params.x0)
+            self.opti.subject_to(self.X[:, -1] == self.params.xf)
 
     def solve(self, solver_name='ipopt', p_opts=None, s_opts=None):
         """Solves the optimization problem."""
@@ -201,17 +253,17 @@ class TrajectoryOptimizer:
             # Set initial guess for optimization variables
             print("Setting initial guess using user-defined function.")
             self.initial_guess_fn(self.opti, self.X, self.U, self.params)
-        elif "x0" in self.params and "xf" in self.params:
-                # If initial and final states are provided, use them to set initial guess
-                print("Setting initial guess using provided x0 and xf.")
-                x0 = np.asarray(self.params['x0']).flatten()
-                xf = np.asarray(self.params['xf']).flatten()
-                if x0.shape != (self.n_x,) or xf.shape != (self.n_x,):
-                    raise ValueError("x0 and xf must have the same shape as the state dimension.")
-                x_init = np.linspace(x0, xf, self.N + 1, axis=1)
-                self.opti.set_initial(self.X, x_init)
         else:
-            print("Warning: No initial guess provided. Using solver's default initialization (likely zeros).")
+            # Set default initial guess using linear interpolation
+            print("Setting initial guess using default linear interpolation.")
+            x_init = np.linspace(self.params.x0, self.params.xf, self.params.N + 1, endpoint=True, axis=1)
+            u_init = np.zeros((self.params.n_u, self.params.N))
+            self.opti.set_initial(self.X, x_init)
+            self.opti.set_initial(self.U, u_init)
+        if self.is_t_variable:
+            # Set initial guess for time variable T
+            self.opti.set_initial(self.params.T, self.params.T_guess)
+
         default_p_opts = {"expand": True}
         default_s_opts = {
             "max_iter": 3000,      # Increase max iterations if needed
@@ -224,14 +276,21 @@ class TrajectoryOptimizer:
             default_s_opts.update(s_opts)
         # Set options for the solver
         self.opti.solver(solver_name, default_p_opts, default_s_opts)
+
         # Solve the optimization problem
         print("Solving the optimization problem.")
         try:
             sol = self.opti.solve()
             print("Optimization problem solved successfully.")
             # Extract the optimized trajectory
-            x_opt = sol.value(self.X).reshape(self.n_x, self.N + 1)
-            u_opt = sol.value(self.U).reshape(self.n_u, self.N)
+            x_opt = sol.value(self.X).reshape(self.params.n_x, self.params.N + 1)
+            u_opt = sol.value(self.U).reshape(self.params.n_u, self.params.N)
+            if self.is_t_variable:
+                T_opt = sol.value(self.params.T)
+                print(f"Optimized time variable T: {T_opt}")
+                self.params.T = T_opt
+                self.params.dt_x = T_opt / self.params.N
+                self.params.dt_u = self.params.dt_x
             return x_opt, u_opt
         except RuntimeError as e:
             print("Error during optimization:", e)
