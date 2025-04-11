@@ -264,6 +264,7 @@ class TriplePendulum:
 # Main execution block
 # ==============================================================================
 def main():
+    SAVE_ANIM = False # Set to True to save the animation
     print("Setting up Triple Pendulum simulation...")
     # Define the parameters for the triple pendulum
     # Ensure consistency in parameter names if TrajectoryOptimizer expects specific ones
@@ -318,6 +319,9 @@ def main():
 
         # Animate the result
         ani = pendulum.animate(x_opt, params)
+        if SAVE_ANIM:
+            ani.save('triple_pendulum_animation.mp4', writer='ffmpeg', fps=30, dpi=200)
+            print("Animation saved as 'triple_pendulum_animation.mp4'.")
 
         # Keep plots displayed
         plt.show()
