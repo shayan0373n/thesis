@@ -122,13 +122,13 @@ class TrajectoryOptimizer:
         if self.params.xf is None:
             self.params.xf = (0,) * self.params.n_x
         if self.params.x_lb is None:
-            self.params.x_lb = (-ca.inf,) * self.params.n_x
+            self.params.x_lb = (None,) * self.params.n_x
         if self.params.x_ub is None:
-            self.params.x_ub = (ca.inf,) * self.params.n_x
+            self.params.x_ub = (None,) * self.params.n_x
         if self.params.u_lb is None:
-            self.params.u_lb = (-ca.inf,) * self.params.n_u
+            self.params.u_lb = (None,) * self.params.n_u
         if self.params.u_ub is None:
-            self.params.u_ub = (ca.inf,) * self.params.n_u
+            self.params.u_ub = (None,) * self.params.n_u
     
     def setup(self):
         """Sets up the optimization problem."""

@@ -14,7 +14,7 @@ class TriplePendulum:
     Represents a triple pendulum system, handling dynamics derivation,
     optimization setup, and animation.
     """
-    def __init__(self, params):
+    def __init__(self, params, **kwargs):
         """
         Initializes the TriplePendulum instance.
 
@@ -41,6 +41,8 @@ class TriplePendulum:
         dynamics_fn_sym = self._derive_symbolic_dynamics()
         self.dynamics_fn = lambda x, u, params: dynamics_fn_sym(x, u)  # Wrap in a lambda to match expected signature
 
+        if 'R' in kwargs:
+            self.R = kwargs['R']
         print("TriplePendulum initialized.")
 
     def _derive_symbolic_dynamics(self):
@@ -117,7 +119,16 @@ class TriplePendulum:
         return dynamics_function
 
     def _cost_power(self, opti, X, U, params):
-        return ca.sumsqr(U)
+        sum = 0
+        for i in range(U.shape[1]):
+            u = U[:, i]
+            v_ankle = X[3, i]
+            v_knee = X[4, i] - X[3, i]
+            v_hip = X[5, i] - X[4, i]
+            v = ca.vertcat(v_ankle, v_knee, v_hip)
+            p = u * v
+            sum += u.T @ self.R @ u * params.dt_x
+        return sum
     
     def _cost_energy(self, opti, X, U, params):
         """
@@ -136,8 +147,11 @@ class TriplePendulum:
         # Keep the hips' y-position above the lower leg
         hip_y = self.l1 * ca.cos(X[0, :]) + self.l2 * ca.cos(X[1, :])
         opti.subject_to(hip_y >= self.l1) # Avoid penetration
+        # Keep the knee angle positive
+        knee_angle = X[1, :] - X[0, :]
+        opti.subject_to(knee_angle >= 0)
 
-    def setup_optimizer(self, params, integration_method='rk4'):
+    def setup_optimizer(self, params, is_variable_time=False, integration_method='rk4'):
         """
         Creates and configures the TrajectoryOptimizer instance.
         """
@@ -147,7 +161,7 @@ class TriplePendulum:
             cost_fn=self._cost_power,
             constraints_fn=self._constraints_fn,
             integration_method=integration_method,
-            is_t_variable=False,
+            is_t_variable=is_variable_time,
             params=params # Pass the full params dict
         )
         optimizer.setup()
@@ -277,8 +291,8 @@ def main():
     params = {
         # Timing
         # 'N': 200,
-        'T': 2.0,       # Total time horizon (s)
-        'dt_x': 0.001,   # State integration time step (s)
+        'T': 1.0,       # Total time horizon (s)
+        'dt_x': 0.01,   # State integration time step (s)
         'dt_u': 0.01,   # Control interval time step (dt_u >= dt_x)
         # Dimensions
         'n_x': 6,       # State dimension [th1, th2, th3, om1, om2, om3]
@@ -293,12 +307,15 @@ def main():
         # 'x_lb': np.array([-2*np.pi]*3 + [-10.0]*3), # Example state bounds
         # 'x_ub': np.array([ 2*np.pi]*3 + [ 10.0]*3),
     }
+    R = np.diag([1, 1, 0.4])
     params = TrajectoryOptimizerParams(**params) # Convert to TrajectoryOptimizerParams
     # Create the pendulum instance (derives dynamics)
-    pendulum = TriplePendulum(d_params)
+    pendulum = TriplePendulum(d_params, R=R)
 
     # Setup the optimizer using the pendulum's methods
-    optimizer = pendulum.setup_optimizer(params, integration_method='trapezoidal')
+    optimizer = pendulum.setup_optimizer(params,
+                                         integration_method='trapezoidal',
+                                         is_variable_time=False)
 
     # Define solver options if defaults are not desired
     # plugin_opts = {"expand": True}

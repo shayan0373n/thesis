@@ -167,8 +167,8 @@ def main():
         # Bounds
         # 'u_lb': (-15.0, ),  # Lower bound for control
         # 'u_ub': (15.0, ),   # Upper bound for control
-        # 'x_lb': (-0.5, None, None, None),  # Lower bound for state
-        # 'x_up': (0.5, None, None, None),   # Upper bound for state
+        'x_lb': (None, None, -1, None),  # Lower bound for state
+        'x_ub': (None, None, 1, None),   # Upper bound for state
         # Initial and final values
         'x0': (np.pi, np.pi, 0, 0),  # Initial state
         'xf': (0, 0, 0, 0),      # Final state
@@ -178,7 +178,7 @@ def main():
     optimizer = TrajectoryOptimizer(
         dynamics_fn=double_pend_dynamics,
         cost_fn=double_pend_cost_fn,
-        constraints_fn=double_pend_constraints,
+        # constraints_fn=double_pend_constraints,
         # boundary_conditions_fn=cartpole_boundary_conditions,
         # initial_guess_fn=cartpole_initial_guess,
         integration_method='trapezoidal',
