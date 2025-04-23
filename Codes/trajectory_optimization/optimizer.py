@@ -25,40 +25,44 @@ def plot_state_trajectory(x, u, params,
 
     if state_labels is None:
         state_labels = [f'x[{i}]' for i in range(nx)]
-        if ylabels_state is None:
-            ylabels_state = state_labels
+    # Assign default ylabels if None, using the potentially generated/provided state_labels
+    if ylabels_state is None:
+        ylabels_state = state_labels
+
     if control_labels is None:
         control_labels = [f'u[{i}]' for i in range(nu)]
-        if ylabels_control is None:
-            ylabels_control = control_labels
+    # Assign default ylabels if None, using the potentially generated/provided control_labels
+    if ylabels_control is None:
+        ylabels_control = control_labels
 
-    fig, ax = plt.subplots(nx + nu, 1, figsize=(10, 10), sharex=True)
+    fig, axs = plt.subplots(nx + nu, 1, figsize=(10, 10), sharex=True)
+    axs = np.atleast_1d(axs) # Ensure axs is always array-like # type: ignore 
     fig.suptitle(suptitle, fontsize=14)
     
     for i in range(nx):
-        ax[i].plot(t, x[i, :], label=state_labels[i])
-        ax[i].set_ylabel(ylabels_state[i])
+        axs[i].plot(t, x[i, :], label=state_labels[i])
+        axs[i].set_ylabel(ylabels_state[i])
         if xf is not None and xf[i] is not None:
-            ax[i].plot(t, xf[i] * np.ones_like(t), 'k--', label='target')
+            axs[i].plot(t, xf[i] * np.ones_like(t), 'k--', label='target')
         if x_lb is not None and x_lb[i] is not None:
-            ax[i].plot(t, x_lb[i] * np.ones_like(t), 'g:', label='x_lb')
+            axs[i].plot(t, x_lb[i] * np.ones_like(t), 'g:', label='x_lb')
         if x_ub is not None and x_ub[i] is not None:
-            ax[i].plot(t, x_ub[i] * np.ones_like(t), 'g:', label='x_ub')
+            axs[i].plot(t, x_ub[i] * np.ones_like(t), 'g:', label='x_ub')
     for i in range(nu):
-        ax[nx + i].stairs(u[i, :], t, baseline=None, label=control_labels[i], color='orange')
-        ax[nx + i].set_ylabel(ylabels_control[i])
+        axs[nx + i].stairs(u[i, :], t, baseline=None, label=control_labels[i], color='orange')
+        axs[nx + i].set_ylabel(ylabels_control[i])
         if u_lb is not None and u_lb[i] is not None:
-            ax[nx + i].plot(t[:-1], u_lb[i] * np.ones_like(t[:-1]), 'g:', label='u_lb')
+            axs[nx + i].plot(t[:-1], u_lb[i] * np.ones_like(t[:-1]), 'g:', label='u_lb')
         if u_ub is not None and u_ub[i] is not None:
-            ax[nx + i].plot(t[:-1], u_ub[i] * np.ones_like(t[:-1]), 'g:', label='u_ub')
-    ax[nx + nu - 1].set_xlabel('Time (s)')
+            axs[nx + i].plot(t[:-1], u_ub[i] * np.ones_like(t[:-1]), 'g:', label='u_ub')
+    axs[nx + nu - 1].set_xlabel('Time (s)')
 
-    for a in ax:
+    for a in axs:
         a.grid(True)
         a.legend()
         a.set_xlim(t[0], t[-1])
-    fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout for suptitle
-    return fig, ax
+    fig.tight_layout(rect=(0, 0.03, 1, 0.95)) # Adjust layout for suptitle
+    return fig, axs
 
 @dataclass
 class TrajectoryOptimizerParams:

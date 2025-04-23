@@ -2,6 +2,7 @@ import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from matplotlib.patches import Rectangle
 from optimizer import TrajectoryOptimizer, TrajectoryOptimizerParams, plot_state_trajectory
 
 # Cartpole parameters
@@ -105,7 +106,7 @@ def animate_cartpole(x, params):
     cart_width = L / 2.0
     cart_height = cart_width / 2.0
     pole_line, = ax_anim.plot([], [], 'o-', lw=3, color='blue', markersize=6)
-    cart_patch = plt.Rectangle((np.nan, np.nan), cart_width, cart_height, fc='gray')
+    cart_patch = Rectangle((np.nan, np.nan), cart_width, cart_height, fc='gray')
     ax_anim.add_patch(cart_patch)
     time_template = 'Time = %.2fs'
     time_text = ax_anim.text(0.05, 0.9, '', transform=ax_anim.transAxes)

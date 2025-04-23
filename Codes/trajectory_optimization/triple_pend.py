@@ -54,11 +54,11 @@ class TriplePendulum:
             ca.Function: A CasADi function f(x, u) -> dxdt.
         """
         print("Deriving symbolic dynamics...")
-        th1, th2, th3 = ca.SX.sym('th1'), ca.SX.sym('th2'), ca.SX.sym('th3')
+        th1, th2, th3 = ca.SX.sym('th1'), ca.SX.sym('th2'), ca.SX.sym('th3') # type: ignore
         q = ca.vertcat(th1, th2, th3)
-        om1, om2, om3 = ca.SX.sym('om1'), ca.SX.sym('om2'), ca.SX.sym('om3')
+        om1, om2, om3 = ca.SX.sym('om1'), ca.SX.sym('om2'), ca.SX.sym('om3') # type: ignore
         q_dot = ca.vertcat(om1, om2, om3)
-        tau1, tau2, tau3 = ca.SX.sym('tau1'), ca.SX.sym('tau2'), ca.SX.sym('tau3')
+        tau1, tau2, tau3 = ca.SX.sym('tau1'), ca.SX.sym('tau2'), ca.SX.sym('tau3') # type: ignore
         x = ca.vertcat(q, q_dot)
         u_input = ca.vertcat(tau1, tau2, tau3)
         # u = ca.vertcat(u_input[0], 0, 0)  # Only use tau1 for now (i.e., turn off tau2 and tau3)
