@@ -32,6 +32,7 @@ class TriplePendulum:
         self.m3 = params['rod3']['m']
         self.l3 = params['rod3']['l']
         self.g = params['g']
+        self.mu = params.get('mu', None)  # Default friction coefficient
         # Moments of inertia about CoM
         self.I1 = (1/12) * self.m1 * self.l1**2
         self.I2 = (1/12) * self.m2 * self.l2**2
@@ -40,9 +41,10 @@ class TriplePendulum:
         # Derive and store the symbolic dynamics function
         dynamics_fn_sym = self._derive_symbolic_dynamics()
         self.dynamics_fn = lambda x, u, params: dynamics_fn_sym(x, u)  # Wrap in a lambda to match expected signature
+        # Derive and store the symbolic center of mass dynamics function
+        self.com_dynamics_fn = self._derive_symbolic_forward_dynamics_com()
 
-        if 'R' in kwargs:
-            self.R = kwargs['R']
+        self.R = kwargs.get('R', np.diag([1, 1, 1]))  # Default cost matrix
         print("TriplePendulum initialized.")
 
     def _derive_symbolic_dynamics(self):
@@ -101,9 +103,6 @@ class TriplePendulum:
 
         C_G = ca.jtimes(dL_dqdot, q, q_dot) - dL_dq # Coriolis, Centrifugal, Gravity terms
         # C_G = ca.simplify(C_G) # Optional simplification
-        
-        # Contact dynamics
-        K = 1000
 
         N = u - C_G # RHS for M*q_ddot = N
 
@@ -117,16 +116,68 @@ class TriplePendulum:
                                         ['x', 'u'], ['dxdt'])
         print("Symbolic dynamics derived.")
         return dynamics_function
+    
+    def _derive_symbolic_forward_dynamics_com(self):
+        """
+        Derives the x_com_ddot and y_com_ddot for the center of mass of the pendulum.
+        """
+        # +x is right, +y is up
+        th1, th2, th3 = ca.SX.sym('th1'), ca.SX.sym('th2'), ca.SX.sym('th3') # type: ignore
+        th1_dot, th2_dot, th3_dot = ca.SX.sym('th1_dot'), ca.SX.sym('th2_dot'), ca.SX.sym('th3_dot') # type: ignore
+        th1_ddot, th2_ddot, th3_ddot = ca.SX.sym('th1_ddot'), ca.SX.sym('th2_ddot'), ca.SX.sym('th3_ddot') # type: ignore
+        th = ca.vertcat(th1, th2, th3)
+        th_dot = ca.vertcat(th1_dot, th2_dot, th3_dot)
+        th_ddot = ca.vertcat(th1_ddot, th2_ddot, th3_ddot)
+        # Unpack parameters
+        l1, l2, l3 = self.l1, self.l2, self.l3
+        m1, m2, m3 = self.m1, self.m2, self.m3
+        M = m1 + m2 + m3
+        x_com1 = -l1 * ca.sin(th1) / 2
+        y_com1 = l1 * ca.cos(th1) / 2
+        x_com2 = -l1 * ca.sin(th1) - l2 * ca.sin(th2) / 2
+        y_com2 = l1 * ca.cos(th1) + l2 * ca.cos(th2) / 2
+        x_com3 = -l1 * ca.sin(th1) - l2 * ca.sin(th2) - l3 * ca.sin(th3) / 2
+        y_com3 = l1 * ca.cos(th1) + l2 * ca.cos(th2) + l3 * ca.cos(th3) / 2
+        x_com = (m1 * x_com1 + m2 * x_com2 + m3 * x_com3) / M
+        y_com = (m1 * y_com1 + m2 * y_com2 + m3 * y_com3) / M
+        # Calculate the derivatives
+        H_x_com, grad_x_com = ca.hessian(x_com, th)
+        H_y_com, grad_y_com = ca.hessian(y_com, th)
+        x_com_ddot = th_dot.T @ H_x_com @ th_dot + grad_x_com.T @ th_ddot
+        y_com_ddot = th_dot.T @ H_y_com @ th_dot + grad_y_com.T @ th_ddot
+        # Create a CasADi function for the center of mass dynamics
+        com_dynamics = ca.Function('com_dynamics', [th, th_dot, th_ddot], [x_com_ddot, y_com_ddot],
+                                  ['th', 'th_dot', 'th_ddot'], ['x_com_ddot', 'y_com_ddot'])
+        print("Symbolic center of mass dynamics derived.")
+        return com_dynamics
 
-    def _cost_power(self, opti, X, U, params):
+    def base_dynamics(self, x, u, params):
+        """
+        Returns (T, N) for the base of the pendulum.
+        Args:
+            x (np.ndarray): State vector (theta, theta_dot).
+            u (np.ndarray): Control vector.
+        """
+        x_ddot = self.dynamics_fn(x, u, params)
+        x_com_ddot, y_com_ddot = self.com_dynamics_fn(x[0:3], x[3:6], x_ddot[3:6])
+        M = self.m1 + self.m2 + self.m3
+        g = self.g
+        T = M * x_com_ddot
+        N = M * y_com_ddot + M * g
+        return ca.vertcat(T, N)
+    
+    def _cost_fn(self, opti, X, U, params):
+        """
+        Cost function
+        """
+        cost =  self._cost_control_effort(opti, X, U, params)
+        # self._cost_energy(opti, X, U, params)
+        return cost
+
+    def _cost_control_effort(self, opti, X, U, params):
         sum = 0
         for i in range(U.shape[1]):
             u = U[:, i]
-            v_ankle = X[3, i]
-            v_knee = X[4, i] - X[3, i]
-            v_hip = X[5, i] - X[4, i]
-            v = ca.vertcat(v_ankle, v_knee, v_hip)
-            p = u * v
             sum += u.T @ self.R @ u * params.dt_x
         return sum
     
@@ -150,6 +201,22 @@ class TriplePendulum:
         # Keep the knee angle positive
         knee_angle = X[1, :] - X[0, :]
         opti.subject_to(knee_angle >= 0)
+        self._base_force_constraints(opti, X, U, params)
+
+    def _base_force_constraints(self, opti, X, U, params):
+        """
+        Constraints for the base of the pendulum.
+        """
+        for i in range(U.shape[1]):
+            u = U[:, i]
+            x = X[:, i]
+            base_force = self.base_dynamics(x, u, params)
+            T = base_force[0]
+            N = base_force[1]
+            # Constraints on the base forces
+            opti.subject_to(N >= 0)  # Normal force must be positive
+            opti.subject_to(ca.fabs(T) <= N * self.mu)  # Friction constraint
+
 
     def setup_optimizer(self, params, is_variable_time=False, integration_method='rk4'):
         """
@@ -158,7 +225,7 @@ class TriplePendulum:
         print(f"Setting up TrajectoryOptimizer with integration: {integration_method}")
         optimizer = TrajectoryOptimizer(
             dynamics_fn=self.dynamics_fn,
-            cost_fn=self._cost_power,
+            cost_fn=self._cost_fn,
             constraints_fn=self._constraints_fn,
             integration_method=integration_method,
             is_t_variable=is_variable_time,
@@ -279,19 +346,22 @@ def main():
     print("Setting up Triple Pendulum simulation...")
     # Define the parameters for the triple pendulum
     # Ensure consistency in parameter names if TrajectoryOptimizer expects specific ones
-    rod1_p = {'m': 0.186, 'l': 0.478}
-    rod2_p = {'m': 0.4, 'l': 0.489}
-    rod3_p = {'m': 1.356, 'l': 0.932}
+    M = 74 # Mass of the pendulum (kg)
+    L = 1.74 # Length of the pendulum (m)
+    rod1_p = {'m': 0.186 * M / 2, 'l': 0.478 * L / 2}
+    rod2_p = {'m': 0.4 * M / 2, 'l': 0.489 * L / 2}
+    rod3_p = {'m': 1.356 * M / 2, 'l': 0.932 * L / 2}
     d_params = {
         'rod1': rod1_p,
         'rod2': rod2_p,
         'rod3': rod3_p,
         'g': 9.81, # Gravity (m/s^2)
+        'mu': 0.6, # Friction coefficient (example)
     }
     params = {
         # Timing
         # 'N': 200,
-        'T': 1.0,       # Total time horizon (s)
+        'T': 1.5,       # Total time horizon (s)
         'dt_x': 0.01,   # State integration time step (s)
         'dt_u': 0.01,   # Control interval time step (dt_u >= dt_x)
         # Dimensions
@@ -299,15 +369,15 @@ def main():
         'n_u': 3,       # Control dimension [tau1, tau2, tau3]
         # Initial and final states (ensure length matches n_x)
         # Example: Start hanging down, finish upright
-        'x0': np.array([0, np.pi/2, 0, 0.0, 0.0, 0.0]), # Hanging down
-        'xf': np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),     # Straight up
+        'x0': np.array([0, np.pi/2, 0, 0.0, 0.0, 0.0]), # Sitting
+        'xf': np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),     # Standing
         # Bounds (Optional - add if needed by optimizer/constraints)
         # 'u_lb': np.array([-10.0, -10.0, -10.0]),
         # 'u_ub': np.array([ 10.0,  10.0,  10.0]),
         # 'x_lb': np.array([-2*np.pi]*3 + [-10.0]*3), # Example state bounds
         # 'x_ub': np.array([ 2*np.pi]*3 + [ 10.0]*3),
     }
-    R = np.diag([1, 1, 0.4])
+    R = np.diag([1, 1, 10])
     params = TrajectoryOptimizerParams(**params) # Convert to TrajectoryOptimizerParams
     # Create the pendulum instance (derives dynamics)
     pendulum = TriplePendulum(d_params, R=R)
@@ -324,6 +394,26 @@ def main():
     # Solve the optimization problem
     x_opt, u_opt = pendulum.solve_optimization(optimizer) #, solver_opts=solver_opts)
 
+    # Reconstruct base forces
+    base_forces = np.zeros((2, u_opt.shape[1]))
+    for i in range(u_opt.shape[1]):
+        u = u_opt[:, i]
+        x = x_opt[:, i]
+        base_forces[:, i] = np.array(pendulum.base_dynamics(x, u, params)).flatten()
+    # Reconstruct x_com
+    x_com = np.zeros((1, u_opt.shape[1]))
+    for i in range(u_opt.shape[1]):
+        x = x_opt[:3, i]
+        th1, th2, th3 = x[0], x[1], x[2]
+        l1, l2, l3 = pendulum.l1, pendulum.l2, pendulum.l3
+        m1, m2, m3 = pendulum.m1, pendulum.m2, pendulum.m3
+        M = m1 + m2 + m3
+        x_com1 = -l1 * np.sin(th1) / 2
+        x_com2 = -l1 * np.sin(th1) - l2 * np.sin(th2) / 2
+        x_com3 = -l1 * np.sin(th1) - l2 * np.sin(th2) - l3 * np.sin(th3) / 2
+        x_com[:, i] = (m1 * x_com1 + m2 * x_com2 + m3 * x_com3) / M
+        
+
     if x_opt is not None and u_opt is not None:
         print("Optimization successful. Plotting and animating...")
         # Plot the results (assuming plot_state_trajectory handles 6 states)
@@ -338,8 +428,32 @@ def main():
             ani.save('triple_pendulum_animation.mp4', writer='ffmpeg', fps=30, dpi=200)
             print("Animation saved as 'triple_pendulum_animation.mp4'.")
 
-        # Keep plots displayed
+
+
+        t = np.linspace(0, params.T, u_opt.shape[1])
+        fig, axs = plt.subplots(nrows=2, ncols=1, sharex=True)
+        # Plot base forces
+        ax = axs[0]
+        ax.plot(t, base_forces[0, :], label='Base Force (T)')
+        ax.plot(t, base_forces[1, :], label='Base Force (N)')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Base Forces (N)')
+        ax.set_title('Base Forces over Time')
+        ax.legend()
+        ax.grid()
+
+        # Plot center of mass trajectory
+        ax = axs[1]
+        ax.plot(t, x_com[0, :], label='x_com')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('x_com (m)')
+        ax.set_title('Center of Mass Trajectory over Time')
+        ax.legend()
+        ax.grid()
+        
         plt.show()
+        
+
     else:
         print("Optimization failed or did not run.")
 

@@ -100,8 +100,8 @@ def optimize_bouncing_ball_casadi(
             opti.subject_to(x_n_plus_1 - x_n == h_n * f_mid)
 
         # 4b. Guard Constraint (y > 0 for intermediate points)
-        # Apply to all points except the very last point of segments that hit the ground (k < K)
-        for n in range(N):
+        # Apply to all points except the first and last point of segments that hit the ground (k < K)
+        for n in range(1, N):
             opti.subject_to(x_k[0, n] > 0)
 
         # 4c. Guard and Reset Constraints (Linking segments k and k+1)
@@ -145,18 +145,20 @@ def optimize_bouncing_ball_casadi(
     print(f"  Optimized Initial State x0 = {optimized_x0.flatten()}")
 
     # Reconstruct time and state arrays
-    times_list = [0.0]
-    states_list = [sol.value(x_vars[0][:, 0])] # Initial state
+    times_list = []
+    states_list = []
     current_time = 0.0
 
     for k in range(num_segments):
         h_sol_k = sol.value(h_vars[k])
         x_sol_k = sol.value(x_vars[k])
-        for n in range(N):
-            current_time += h_sol_k[n]
+        times_list.append(current_time)
+        states_list.append(x_sol_k[:, 0]) # State at start of interval k
+        for n in range(1, N + 1):
+            current_time += h_sol_k[n - 1]
             times_list.append(current_time)
-            states_list.append(x_sol_k[:, n+1]) # State at end of interval n
-
+            states_list.append(x_sol_k[:, n]) # State at end of interval n
+    
     times = np.array(times_list)
     states = np.array(states_list).T # Shape (2, num_total_knots)
 
