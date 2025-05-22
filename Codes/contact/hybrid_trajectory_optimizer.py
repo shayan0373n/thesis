@@ -28,10 +28,10 @@ class Mode:
     name: str
     n_x: int # State dimension
     n_u: int # Control dimension
-    # Dynamics function: f(x, u, params) -> x_dot
-    dynamics_fn: Callable[[ca.MX, ca.MX, dict[str, Any]], ca.MX]
-    # Optional mode-specific path constraints: g(opti, x, u, params)
-    constraints_fn: Callable[[ca.Opti, ca.MX, ca.MX, dict[str, Any]], None] | None = None
+    # Dynamics function: f(x, u) -> x_dot
+    dynamics_fn: Callable
+    # Optional mode-specific path constraints: g(opti, x, u)
+    constraints_fns: list[Callable] = field(default_factory=list) # List of constraint functions
     # Mode specific bounds
     x_lb: Sequence | None = None # Lower bound on state
     x_ub: Sequence | None = None # Upper bound on state
@@ -40,8 +40,6 @@ class Mode:
     # Mode specific initial guess
     initial_x_guess: npt.ArrayLike | None = None # Initial guess for state
     initial_u_guess: npt.ArrayLike | None = None # Initial guess for control
-    # Mode specific other parameters
-    other: dict[str, Any] = field(default_factory=dict) # For dynamics, costs etc.
 
     def __post_init__(self):
         if self.x_lb is None:
@@ -80,24 +78,22 @@ class Mode:
             n_x=self.n_x,
             n_u=self.n_u,
             dynamics_fn=self.dynamics_fn,
-            constraints_fn=self.constraints_fn,
+            constraints_fns=self.constraints_fns.copy(),
             x_lb=self.x_lb.copy(),
             x_ub=self.x_ub.copy(),
             u_lb=self.u_lb.copy(),
             u_ub=self.u_ub.copy(),
             initial_x_guess=self.initial_x_guess.copy(),
             initial_u_guess=self.initial_u_guess.copy(),
-            other=self.other.copy()
         )
-
 
 @dataclass
 class Transition:
     """Defines a transition between two modes."""
-    # Guard function: g(x, u, params) -> scalar_value (transition occurs when value == 0)
-    guard_fn: Callable[[ca.MX, ca.MX, dict[str, Any]], ca.MX]
-    # Reset map: r(x, u, params) -> x_plus (state immediately after transition)
-    reset_map_fn: Callable[[ca.MX, ca.MX, dict[str, Any]], ca.MX]
+    # Guard function: g(x, u) -> scalar_value (transition occurs when value == 0)
+    guard_fn: Callable
+    # Reset map: r(x, u) -> x_plus (state immediately after transition)
+    reset_map_fn: Callable
 
 
 @dataclass
@@ -106,22 +102,24 @@ class HybridSystemParams:
     mode_sequence: Sequence[Mode] # Sequence of modes
     transitions: Sequence[Transition] # List of transitions
     # --- Global parameters ---
-    num_knot_points_per_segment: int # N: Number of intervals (N+1 points) per segment
     # --- Initial/Final conditions ---
-    x0: Sequence # Initial state constraint
+    x0: Sequence | None = None # Initial state constraint (optional)
     xf: Sequence | None = None # Final state constraint (optional)
+    num_knot_points_per_segment: int = 100 # N: Number of intervals (N+1 points) per segment
     # --- Time parameters ---
     T: float | None = None # Fixed total time T (if None, T is optimized)
+    min_time_step: float = MIN_TIME_STEP # Minimum time step for numerical stability
+    max_time_step: float | None = None # Maximum time step
     # --- Time Optimization (if T is None) ---
     T_guess: float = 1.0
     T_lb: float | None = 1e-4
     T_ub: float | None = None
-    # --- Other user params ---
-    other: dict[str, Any] = field(default_factory=dict) # For dynamics, costs etc.
 
     def __post_init__(self):
         if self.xf is None:
             self.xf = [None] * self.mode_sequence[-1].n_x
+        if self.x0 is None:
+            self.x0 = [None] * self.mode_sequence[0].n_x
         self._validate()
 
     def _validate(self):
@@ -130,6 +128,7 @@ class HybridSystemParams:
         assert len(self.transitions) == len(self.mode_sequence) - 1, "Number of transitions must be one less than number of modes."
         assert self.num_knot_points_per_segment > 0, "num_knot_points_per_segment must be positive."
         assert len(self.x0) == self.mode_sequence[0].n_x, "x0 must match n_x dimension of the first mode."
+        assert len(self.xf) == self.mode_sequence[-1].n_x, "xf must match n_x dimension of the last mode."
         # Add more checks as needed (e.g., bounds dimensions)
 
 
@@ -138,8 +137,8 @@ class HybridSystemParams:
 class HybridTrajectoryOptimizer:
     def __init__(self,
                  params: HybridSystemParams,
-                 cost_fn: Callable[[ca.Opti, list[ca.MX], list[ca.MX], list[ca.MX], HybridSystemParams], ca.MX],
-                 global_constraints_fn: Callable[[ca.Opti, list[ca.MX], list[ca.MX], list[ca.MX], HybridSystemParams], None] | None = None,
+                 cost_fn: Callable, # f(X_vars, U_vars, H_vars) -> cost_value
+                 global_constraints_fns: list[Callable] = [], # f(opti, X_vars, U_vars, H_vars) -> None
                  solver_name: str = 'ipopt',
                  solver_options: dict | None = None):
         """
@@ -156,24 +155,21 @@ class HybridTrajectoryOptimizer:
         """
         self.params = params
         self.cost_fn = cost_fn
-        self.global_constraints_fn = global_constraints_fn
-        self.solver_name = solver_name
-        self.solver_options = solver_options if solver_options is not None else {}
+        self.global_constraints_fns = global_constraints_fns
 
         self.opti = ca.Opti()
         self.num_modes = len(params.mode_sequence)
         self.N = params.num_knot_points_per_segment # Knot points per segment (N intervals)
 
         # --- Decision Variables ---
-        self.X_vars: list[ca.MX] = [] # State variables [n_x, N+1] for each segment k
-        self.U_vars: list[ca.MX] = [] # Control variables [n_u, N] for each segment k
-        self.H_vars: list[ca.MX] = [] # Time steps [1, N] for each segment k
-        self.T_var: ca.MX | None = None # Total time (if optimized)
+        self.X_vars: list = [] # State variables [n_x, N+1] for each segment k
+        self.U_vars: list = [] # Control variables [n_u, N] for each segment k
+        self.H_vars: list = [] # Time steps [1, N] for each segment k
+        self.T_var = None # Total time (if optimized)
 
         self._setup_variables()
         self._setup_constraints()
         self._setup_objective()
-
 
     def _setup_variables(self):
         """Define CasADi decision variables for the optimizer."""
@@ -202,13 +198,15 @@ class HybridTrajectoryOptimizer:
             Xk = self.opti.variable(n_x, N + 1)
             self.X_vars.append(Xk)
             # Controls
-            Uk = self.opti.variable(n_u, N)
+            Uk = self.opti.variable(n_u, N + 1)
             self.U_vars.append(Uk)
             # Time steps
             Hk = self.opti.variable(1, N)
-            self.H_vars.append(Hk)
-            self.opti.subject_to(Hk >= MIN_TIME_STEP) # Time steps must be positive
+            self.opti.subject_to(Hk >= self.params.min_time_step)
+            if self.params.max_time_step is not None:
+                self.opti.subject_to(Hk <= self.params.max_time_step)
             self.opti.set_initial(Hk, h_guess_val)
+            self.H_vars.append(Hk)
 
             # --- Set initial guesses if provided ---
             init_x_guess = self.params.mode_sequence[k].initial_x_guess
@@ -216,9 +214,8 @@ class HybridTrajectoryOptimizer:
             self.opti.set_initial(Xk, init_x_guess_stretched)
             # Set initial guess for control
             init_u_guess = self.params.mode_sequence[k].initial_u_guess
-            init_u_guess_stretched = stretch_array(init_u_guess, N)
+            init_u_guess_stretched = stretch_array(init_u_guess, N + 1)
             self.opti.set_initial(Uk, init_u_guess_stretched)
-
 
     def _setup_constraints(self):
         """Apply all constraints: dynamics, transitions, bounds, global, boundary."""
@@ -232,8 +229,10 @@ class HybridTrajectoryOptimizer:
             self.opti.subject_to(total_h_sum == self.params.T)
 
         # --- Boundary Conditions ---
-        # Initial state
-        self.opti.subject_to(self.X_vars[0][:, 0] == self.params.x0)
+        # Initial state (optional)
+        for i, x0 in enumerate(self.params.x0):
+            if x0 is not None:
+                self.opti.subject_to(self.X_vars[0][i, 0] == x0)
         # Final state (optional)
         for i, xf in enumerate(self.params.xf):
             if xf is not None:
@@ -248,22 +247,21 @@ class HybridTrajectoryOptimizer:
 
             # --- 4a. Collocation Constraints (Dynamics within segment) ---
             # Midpoint collocation: x_{n+1} - x_n = h_n * f( (x_n+x_{n+1})/2, (u_n+u_{n+1})/2 )
-            # NOTE: Assuming ZOH control within the interval for simplicity here.
-            #       Midpoint collocation on control might be better: U_mid = 0.5*(Uk[:,n] + Uk[:,n+1])?
-            #       Let's stick to ZOH U_k,n for now, as in the bouncing ball.
             for n in range(N):
                 x_n = Xk[:, n]
                 x_n_plus_1 = Xk[:, n+1]
-                u_n = Uk[:, n] # Control assumed constant over interval n
+                u_n = Uk[:, n]
+                u_n_plus_1 = Uk[:, n+1]
                 h_n = Hk[0, n]
                 x_mid = 0.5 * (x_n + x_n_plus_1)
-                f_mid = mode.dynamics_fn(x_mid, u_n, self.params.other)
+                u_mid = 0.5 * (u_n + u_n_plus_1)
+                f_mid = mode.dynamics_fn(x_mid, u_mid)
                 self.opti.subject_to(x_n_plus_1 - x_n == h_n * f_mid)
 
             # --- 4b. Mode-Specific Constraints ---
-            if mode.constraints_fn:
-                 # Apply to all points in the segment? Or just intermediate? Assume all for now.
-                mode.constraints_fn(self.opti, Xk, Uk, self.params.other)
+            for constraints_fn in mode.constraints_fns:
+                # Apply to all points in the segment? Or just intermediate? Assume all for now.
+                constraints_fn(self.opti, Xk, Uk, Hk)
 
             # --- 4c. Transition Constraints (Guard and Reset) ---
             if k < self.num_modes - 1:
@@ -272,21 +270,24 @@ class HybridTrajectoryOptimizer:
                 x_end_k = Xk[:, -1]
                 u_end_k = Uk[:, -1] # Control at the end of the segment
                 x_start_k_plus_1 = self.X_vars[k+1][:, 0]
+                u_start_k_plus_1 = self.U_vars[k+1][:, 0]
 
                 # Guard Constraint: guard_fn(x_end, u_end) == 0
-                guard_value = transition.guard_fn(x_end_k, u_end_k, self.params.other)
+                guard_value = transition.guard_fn(x_end_k, u_end_k)
                 self.opti.subject_to(guard_value == 0)
 
                 # Guard constraints: guard_fn must be positive for all other points
                 for n in range(1, N):
                     x_n = Xk[:, n]
                     u_n = Uk[:, n] 
-                    guard_value = transition.guard_fn(x_n, u_n, self.params.other)
+                    guard_value = transition.guard_fn(x_n, u_n)
                     self.opti.subject_to(guard_value > 0)
 
                 # Reset Map: x_start_{k+1} = reset_map(x_end_k, u_end_k)
-                reset_value = transition.reset_map_fn(x_end_k, u_end_k, self.params.other)
+                reset_value = transition.reset_map_fn(x_end_k, u_end_k)
                 self.opti.subject_to(x_start_k_plus_1 == reset_value)
+                # Control continuity
+                self.opti.subject_to(u_start_k_plus_1 == u_end_k)
 
             # --- Apply Box Constraints ---
             # State bounds
@@ -303,25 +304,21 @@ class HybridTrajectoryOptimizer:
                     self.opti.subject_to(Uk[i, :] <= mode.u_ub[i])
 
         # --- Apply Optional Global Constraints ---
-        if self.global_constraints_fn:
-             self.global_constraints_fn(self.opti, self.X_vars, self.U_vars, self.H_vars, self.params)
-
+        for global_constraints_fn in self.global_constraints_fns:
+             global_constraints_fn(self.opti, self.X_vars, self.U_vars, self.H_vars)
 
     def _setup_objective(self):
         """Define the objective function."""
-        cost = self.cost_fn(self.opti, self.X_vars, self.U_vars, self.H_vars, self.params)
+        cost = self.cost_fn(self.X_vars, self.U_vars, self.H_vars)
         self.opti.minimize(cost)
 
-
-    def solve(self):
+    def solve(self, solver_name: str = 'ipopt', solver_options: dict = {}):
         """Solve the optimization problem."""
         print(f"Solving hybrid trajectory optimization with {self.num_modes} segments...")
         # Set solver options
         p_opts = {"expand": True} # Needed for some CasADi functions inside constraints
-        s_opts = {"max_iter": 3000, "print_level": 5} # Default IPOPT options
-        s_opts.update(self.solver_options) # Overwrite with user options
 
-        self.opti.solver(self.solver_name, p_opts, s_opts)
+        self.opti.solver(solver_name, p_opts, solver_options)
 
         try:
             sol = self.opti.solve()
@@ -387,43 +384,42 @@ if __name__ == "__main__":
 
     # --- Define the Hybrid System Components ---
 
-    # Mode 1: Simple integrator, drifts right
-    def dynamics_mode1(x, u, params):
-        # x = [p], u = [v]
-        return u[0] + 0.1 # Drift term
+    # Mode 1: Simple double integrator, drifts right
+    def dynamics_mode1(x, u):
+        # v = p_dot, u = v_dot
+        return ca.vertcat(x[1], u[0] + 0.1) 
 
     # Mode 2: Simple integrator, drifts left
-    def dynamics_mode2(x, u, params):
-        # x = [p], u = [v]
-        return u[0] - 0.1 # Drift term
+    def dynamics_mode2(x, u):
+        return ca.vertcat(x[1], u[0] - 0.1)
 
     # Constraint for Mode 2: Keep position positive
-    def constraints_mode2(opti, Xk, Uk, params):
-        opti.subject_to(Xk[0, :] >= -0.1) # Allow slight negative for numerics
+    def constraints_mode2(opti, Xk, Uk, Hk):
+        opti.subject_to(Xk[0, :] > 0)
 
     # Transition from Mode 1 to Mode 2 when x > 1.0
-    def guard_1_to_2(x, u, params):
+    def guard_1_to_2(x, u):
         return 1.0 - x[0] # Trigger when x[0] == 1.0
 
     # Transition from Mode 2 to Mode 1 when x < 0.5
-    def guard_2_to_1(x, u, params):
+    def guard_2_to_1(x, u):
         return x[0] - 0.5 # Trigger when x[0] == 0.5
 
     # Reset map (identity map in this case)
-    def reset_identity(x, u, params):
+    def reset_identity(x, u):
         return x
 
     # --- Define Modes and Transitions ---
-    n_x = 1 # State dimension
+    n_x = 2 # State dimension
     n_u = 1 # Control dimension
-    u_lb = -1.0
-    u_ub = 1.0
+    u_lb = -5.0
+    u_ub = 5.0
     mode1 = Mode(name="DriftRight", n_x=n_x, n_u=n_u,
                  dynamics_fn=dynamics_mode1,
                  u_lb=[u_lb], u_ub=[u_ub],)
     mode2 = Mode(name="DriftLeft", n_x=n_x, n_u=n_u,
                  dynamics_fn=dynamics_mode2,
-                 constraints_fn=constraints_mode2,
+                 constraints_fns=[constraints_mode2],
                  u_lb=[u_lb], u_ub=[u_ub],)
     trans12 = Transition(guard_fn=guard_1_to_2, reset_map_fn=reset_identity)
     trans21 = Transition(guard_fn=guard_2_to_1, reset_map_fn=reset_identity)
@@ -434,24 +430,23 @@ if __name__ == "__main__":
         transitions=[trans12, trans21],
         num_knot_points_per_segment=20, # N
         T=5.0, # Fixed total time
-        x0=[0.0],      # Start at position 0
-        xf=[1.5],      # End at position 1.5
+        x0=[0.0, 0.0],      # Start at position 0
+        xf=[1.5, 0.0],      # End at position 1.5
     )
 
     # --- Cost Function: Minimize control effort ---
-    def cost_function(opti, X_vars, U_vars, H_vars, params):
+    def cost_function(X_vars: list, U_vars: list, H_vars: list):
         total_cost = 0
-        for k in range(len(U_vars)):
-            Uk = U_vars[k]
-            # Integrate squared controls over the segment
-            # Using sum (Uk^2 * Hk) as approximation
-            # total_cost += ca.sumsqr(Uk) * ca.sum(Hk) / params.num_knot_points_per_segment # Approximate integral
-            # Or just sumsqr(Uk) without time scaling? Let's do simple sumsqr
-            total_cost += ca.sumsqr(Uk)
-
+        for u, h in zip(U_vars, H_vars):
+            for n in range(h.shape[1]):
+                un = u[:, n]
+                un_plus_1 = u[:, n + 1]
+                hn = h[0, n]
+                # Cost function: minimize the control effort
+                total_cost += hn * (ca.sumsqr(un) + ca.sumsqr(un_plus_1))  # Control effort
         return total_cost
     
-    def cost_function_minimum_time(opti, X_vars, U_vars, H_vars, params):
+    def cost_function_minimum_time(X_vars, U_vars, H_vars):
         total_time = 0
         for k in range(len(H_vars)):
             Hk = H_vars[k]
@@ -498,9 +493,8 @@ if __name__ == "__main__":
 
         # Plot control
         plt.subplot(2, 1, 2)
-        # Use stairs for ZOH control - need time points matching control intervals
         for k in range(num_modes):
-            plt.stairs(controls[k][0, :], times[k], baseline=None, color='orange', label=f'Mode {k+1} u(t)', lw=2)
+            plt.plot(times[k], controls[k][0, :], color='orange', label=f'Mode {k+1} u(t)', lw=2)
 
         # Mark segment boundaries
         for k in range(num_modes):
