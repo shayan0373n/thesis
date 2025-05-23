@@ -138,9 +138,8 @@ class HybridTrajectoryOptimizer:
     def __init__(self,
                  params: HybridSystemParams,
                  cost_fn: Callable, # f(X_vars, U_vars, H_vars) -> cost_value
-                 global_constraints_fns: list[Callable] = [], # f(opti, X_vars, U_vars, H_vars) -> None
-                 solver_name: str = 'ipopt',
-                 solver_options: dict | None = None):
+                 global_constraints_fns: list[Callable] = [] # f(opti, X_vars, U_vars, H_vars) -> None
+                ):
         """
         Initializes the hybrid trajectory optimizer.
 
@@ -319,24 +318,19 @@ class HybridTrajectoryOptimizer:
         p_opts = {"expand": True} # Needed for some CasADi functions inside constraints
 
         self.opti.solver(solver_name, p_opts, solver_options)
-
+        return_val = {}
         try:
             sol = self.opti.solve()
             print("Optimization SUCCESSFUL!")
+            val_fn = sol.value
+            return_val['success'] = True
 
         except Exception as e:
             print(f"Optimization FAILED. Error: {e}")
             # You might be able to get partial results from opti.debug.value(var)
             # Or check opti.debug.stats()
-            return {
-                "success": False,
-                "times": None,
-                "states": None,
-                "controls": None,
-                "timesteps": None,
-                "T": None,
-                "optimizer": self.opti
-            }
+            val_fn = self.opti.debug.value
+            return_val['success'] = False
         # --- Extract Results ---
         res_x = []
         res_u = []
@@ -344,12 +338,12 @@ class HybridTrajectoryOptimizer:
         for k in range(self.num_modes):
             n_x_k = self.params.mode_sequence[k].n_x
             n_u_k = self.params.mode_sequence[k].n_u
-            res_x.append(sol.value(self.X_vars[k]).reshape((n_x_k, -1)))
-            res_u.append(sol.value(self.U_vars[k]).reshape((n_u_k, -1)))
-            res_h.append(sol.value(self.H_vars[k]).reshape((1, -1)))
+            res_x.append(val_fn(self.X_vars[k]).reshape((n_x_k, -1)))
+            res_u.append(val_fn(self.U_vars[k]).reshape((n_u_k, -1)))
+            res_h.append(val_fn(self.H_vars[k]).reshape((1, -1)))
         res_t = self.params.T # Fixed time
         if self.T_var is not None:
-            res_t = sol.value(self.T_var) # Optimized time
+            res_t = val_fn(self.T_var) # Optimized time
 
         # Reconstruct continuous time and state/control trajectories
         times_list = []
@@ -367,15 +361,17 @@ class HybridTrajectoryOptimizer:
         if self.T_var is not None:
                 print(f"  Optimized Total Time T: {res_t:.4f}")
 
-        return {
-            "success": True,
-            "times": times_list,
-            "states": res_x,
-            "controls": res_u,
-            "timesteps": res_h,
-            "T": res_t,
-            "optimizer": self.opti,
-        }
+        return_val.update(
+            {
+                "times": times_list,
+                "states": res_x,
+                "controls": res_u,
+                "timesteps": res_h,
+                "T": res_t,
+                "optimizer": self.opti,
+            }
+        )
+        return return_val
 
 
 

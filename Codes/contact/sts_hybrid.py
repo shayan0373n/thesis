@@ -114,8 +114,22 @@ class STSTrajectoryOptimizer:
         # total_cost += 1E7 * self.cost_function_cop(X_vars, U_vars, H_vars)
         total_cost += self.cost_function_control_effort(X_vars, U_vars, H_vars)
         # total_cost += 1E5 * self.cost_function_time(X_vars, U_vars, H_vars)
-        # total_cost += self.cost_function_positive_energy(X_vars, U_vars, H_vars)
+        # total_cost += 1E5 * self.cost_function_positive_energy(X_vars, U_vars, H_vars)
+        # total_cost += 1E3 * self.cost_function_max_torque(X_vars, U_vars, H_vars)
         return total_cost
+    
+    def cost_function_max_torque(self, X_vars: list, U_vars: list, H_vars: list):
+        """
+        Cost function to minimize the maximum torque.
+        X_vars: state variables
+        U_vars: control variables
+        H_vars: hybrid variables
+        """
+        U = ca.hcat(U_vars)
+        # Calculate the maximum torque
+        max_torque = ca.norm_inf(U)
+        # Cost function: minimize the maximum torque
+        return max_torque
     
     def cost_function_cop(self, X_vars: list, U_vars: list, H_vars: list):
         """
@@ -173,7 +187,7 @@ class STSTrajectoryOptimizer:
                 u = U[:, n]
                 h = H[0, n]
                 # Calculate the kinetic energy
-                T = u.T @ self.R @ v
+                T = u.T @ v
                 # Calculate the positive energy
                 T_pos = ca.fmax(0, T)
                 total_cost += h * T_pos
@@ -305,19 +319,22 @@ class STSTrajectoryOptimizer:
 
 ###
 MU = 0.5 # Coefficient of friction
-T_UB = 1.5 # Upper bound on total time
-N_knots = 10 # Number of knot points per segment
+T_UB = 10.0 # Upper bound on total time
+N_knots = 25 # Number of knot points per segment
 M = 74 # Mass of the pendulum (kg)
 L = 1.74 # Length of the pendulum (m)
 lleg = Link(m=0.186 / 2 * M, l=0.478 / 2 * L)  # Lower leg link
 uleg = Link(m=0.4 / 2 * M, l=0.489 / 2 * L)  # Upper leg link
 torso = Link(m=1.356 / 2 * M, l=0.932 / 2 * L)  # Torso link
-SEAT_POS = (None, 0.4) # Seat position
-FOOT_X_LIMS = (-0.05, 0.2) # Foot x limits
-R_weights = (1, 1, 1) # Control weights
 # lleg = Link(m=1, l=1)  # Link 1
 # uleg = Link(m=1, l=1)  # Link 2
 # torso = Link(m=1, l=1)  # Link 3
+SEAT_POS = (-0.2, 0.4) # Seat position
+FOOT_X_LIMS = (-0.05, 0.2) # Foot x limits
+R_weights = (1, 3, 1) # Control weights
+
+U_LB = (None,) * 3 # Lower bound on control inputs
+U_UB = (None,) * 3 # Upper bound on control inputs
 
 # Define the system
 sts = STS(link1=lleg, link2=uleg, link3=torso,
@@ -336,10 +353,13 @@ mode_sit = Mode(
     dynamics_fn=sts.sit_dynamics_fn,
     n_x=6,
     n_u=3,
-    constraints_fns=[sts_optimizer.seat_contact_no_slip_constraint_fn,
-                     sts_optimizer.initial_x_seat_pos_constraint_fn,
+    constraints_fns=[
+                sts_optimizer.seat_contact_no_slip_constraint_fn,
+                sts_optimizer.initial_x_seat_pos_constraint_fn,
                      ],
     initial_x_guess=sit_mode_initial_guess,
+    u_lb=U_LB,
+    u_ub=U_UB,
 )
 
 mode_stand = Mode(
@@ -348,10 +368,11 @@ mode_stand = Mode(
     n_x=6,
     n_u=3,
     constraints_fns=[   
-                sts_optimizer.j2_y_pos_higher_than_seat_constraint_fn,
                 sts_optimizer.COP_constraint_fn,
                 sts_optimizer.knee_joint_constraint_fn,
                     ],
+    u_lb=U_LB,
+    u_ub=U_UB,
 )
 
 transition_sit_stand = Transition(
@@ -377,60 +398,59 @@ hybrid_optimizer = HybridTrajectoryOptimizer(
                             sts_optimizer.equal_time_segment_global_constraint_fn,
                             sts_optimizer.control_effort_vanishes_global_constraint_fn,
                             ],
-    solver_name='ipopt',
-    solver_options={
-        'ipopt.max_iter': 10000,
-        'ipopt.linear_solver': 'ma57',
-        'ipopt.fixed_variable_treatment': 'make_constraint',
-    }
 )
 
 # Solve the optimization problem
-solution = hybrid_optimizer.solve()
+solver_name = 'ipopt'
+solver_options = {
+    'max_iter': 10000,
+    'fixed_variable_treatment': 'make_constraint',
+    'tol': 1E-6,
+}
+solution = hybrid_optimizer.solve(solver_name=solver_name, solver_options=solver_options)
 
-if solution['success']:
-    times = solution['times']
-    states = solution['states']
-    controls = solution['controls']
-    t_all = np.hstack(times)
-    x_all = np.hstack(states)
-    u_all = np.hstack(controls)
-    t_linear = np.linspace(0, t_all[-1], 100)
-    dt = t_linear[1] - t_linear[0]
-    x_sampled = np.zeros((x_all.shape[0], len(t_linear)))
-    u_sampled = np.zeros((u_all.shape[0], len(t_linear)))
-    for i in range(x_all.shape[0]):
-        # Interpolate the state variables
-        x_sampled[i, :] = np.interp(t_linear, t_all, x_all[i, :])
-    for i in range(u_all.shape[0]):
-        # Interpolate the control variables
-        u_sampled[i, :] = np.interp(t_linear, t_all, u_all[i, :])
-    com_sampled = sts.com_pos(x_sampled)
-    cop_sampled = np.zeros((1, len(t_linear)))
-    for i in range(len(t_linear)):
-        # Calculate the CoP
-        cop_sampled[:, i] = sts.cop_x(x_sampled[:, i], u_sampled[:, i])
-    ani = sts.animate(x_sampled, dt=dt)
+times = solution['times']
+states = solution['states']
+controls = solution['controls']
+t_all = np.hstack(times)
+x_all = np.hstack(states)
+u_all = np.hstack(controls)
+t_linear = np.linspace(0, t_all[-1], 100)
+dt = t_linear[1] - t_linear[0]
+x_sampled = np.zeros((x_all.shape[0], len(t_linear)))
+u_sampled = np.zeros((u_all.shape[0], len(t_linear)))
+for i in range(x_all.shape[0]):
+    # Interpolate the state variables
+    x_sampled[i, :] = np.interp(t_linear, t_all, x_all[i, :])
+for i in range(u_all.shape[0]):
+    # Interpolate the control variables
+    u_sampled[i, :] = np.interp(t_linear, t_all, u_all[i, :])
+com_sampled = sts.com_pos(x_sampled)
+cop_sampled = np.zeros((1, len(t_linear)))
+for i in range(len(t_linear)):
+    # Calculate the CoP
+    cop_sampled[:, i] = sts.cop_x(x_sampled[:, i], u_sampled[:, i])
+ani = sts.animate(x_sampled, dt=dt)
 
-    fig, ax = plt.subplots(5, 1, figsize=(10, 8))
-    ax[0].plot(t_linear, x_sampled[:3, :].T, label=['q1', 'q2', 'q3'])
-    ax[0].set_title('Joint Angles')
-    ax[0].set_ylabel('Angle (rad)')
-    ax[1].plot(t_linear, x_sampled[3:, :].T, label=['q1_dot', 'q2_dot', 'q3_dot'])
-    ax[1].set_title('Joint Velocities')
-    ax[1].set_ylabel('Velocity (rad/s)')
-    ax[2].plot(t_linear, u_sampled.T, label=['u1', 'u2', 'u3'])
-    ax[2].set_title('Control Inputs')
-    ax[2].set_ylabel('Torque (Nm)')
-    ax[3].plot(t_linear, com_sampled.T, label=['CoM x', 'CoM y'])
-    ax[3].set_title('Center of Mass')
-    ax[3].set_ylabel('CoM (m)')
-    ax[4].plot(t_linear, cop_sampled.T, label='CoP')
-    ax[4].set_title('Center of Pressure')
-    ax[4].set_ylabel('CoP (m)')
-    ax[-1].set_xlabel('Time (s)')
-    for a in ax:
-        a.legend()
-        a.grid()
-        a.set_xlim([0, t_linear[-1]])
-    plt.show()
+fig, ax = plt.subplots(5, 1, figsize=(10, 8))
+ax[0].plot(t_linear, x_sampled[:3, :].T, label=['q1', 'q2', 'q3'])
+ax[0].set_title('Joint Angles')
+ax[0].set_ylabel('Angle (rad)')
+ax[1].plot(t_linear, x_sampled[3:, :].T, label=['q1_dot', 'q2_dot', 'q3_dot'])
+ax[1].set_title('Joint Velocities')
+ax[1].set_ylabel('Velocity (rad/s)')
+ax[2].plot(t_linear, u_sampled.T, label=['u1', 'u2', 'u3'])
+ax[2].set_title('Control Inputs')
+ax[2].set_ylabel('Torque (Nm)')
+ax[3].plot(t_linear, com_sampled.T, label=['CoM x', 'CoM y'])
+ax[3].set_title('Center of Mass')
+ax[3].set_ylabel('CoM (m)')
+ax[4].plot(t_linear, cop_sampled.T, label='CoP')
+ax[4].set_title('Center of Pressure')
+ax[4].set_ylabel('CoP (m)')
+ax[-1].set_xlabel('Time (s)')
+for a in ax:
+    a.legend()
+    a.grid()
+    a.set_xlim([0, t_linear[-1]])
+plt.show()
